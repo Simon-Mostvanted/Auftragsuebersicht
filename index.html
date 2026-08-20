@@ -104,6 +104,11 @@ const SUPABASE_KEY = "sb_publishable_bKycBdawzkSItE7G0YVamQ_ikkJMm0j";
    >>> Vor dem Einsatz ändern. <<< */
 const ADMIN_PIN = "9317";
 
+/* Unter diesem Namen laufen Änderungen aus dem Admin-Bereich. Der
+   Mitarbeiter muss in werkstatt.mitarbeiter stehen (Update-03), aber im
+   Bereich 'buero' - dann erscheint er nicht bei den Namenskacheln. */
+const ADMIN_NAME = "Simon";
+
 const BEREICH = "schweisserei";
 const BUCKET  = "werkstatt-belege";
 
@@ -446,6 +451,9 @@ function Anwendung() {
      Adminmodus stehen bleiben. */
   const [admin, setAdmin] = useState(false);
   const [adminDialog, setAdminDialog] = useState(false);
+  /* Erzwingt die Namensauswahl, auch wenn schon ein Name gesetzt ist -
+     für den Wechsel über die Kopfzeile. */
+  const [nameWaehlen, setNameWaehlen] = useState(false);
 
   const melde = useCallback((text, art = "gut") => {
     setToast({ text, art });
@@ -527,17 +535,34 @@ function Anwendung() {
 
   const adminBlock = adminDialog ? (
     <AdminAnmeldung
-      onOk={() => { setAdmin(true); setAdminDialog(false); melde("Admin-Modus aktiv."); }}
+      onOk={() => {
+        setAdmin(true);
+        setAdminDialog(false);
+        setNameWaehlen(false);
+        /* Ohne bisherigen Namen unter der Admin-Kennung weiterarbeiten -
+           dann steht bei Änderungen ein Name statt einer Lücke. Wer schon
+           angemeldet ist, behält seinen eigenen: Er hat es ja getan. */
+        if (!ichId) {
+          const adminMa = mitarbeiter.find(m => m.name === ADMIN_NAME);
+          if (adminMa) setIchId(adminMa.id);
+        }
+        melde("Admin-Modus aktiv.");
+      }}
       onSchliessen={() => setAdminDialog(false)}
     />
   ) : null;
 
   const adminUmschalten = () => admin ? setAdmin(false) : setAdminDialog(true);
 
-  if (!ichId) {
+  /* Wer den Admin-Bereich freischaltet, kommt ohne Namen durch: Aufträge
+     anlegen, ändern und löschen braucht keine Zuordnung. Buchen und
+     Abhaken bleibt dafür gesperrt, bis ein Name gewählt ist - sonst
+     stünden falsche Namen in der Historie. */
+  if (nameWaehlen || (!ichId && !admin)) {
     return (
       <React.Fragment>
-        <NamensAuswahl mitarbeiter={mitarbeiter} letzterName={letzterName} onWahl={anmelden}
+        <NamensAuswahl mitarbeiter={mitarbeiter} letzterName={letzterName}
+                       onWahl={m => { anmelden(m); setNameWaehlen(false); }}
                        admin={admin} onAdmin={adminUmschalten} />
         {adminBlock}
         {toastBlock}
@@ -551,7 +576,7 @@ function Anwendung() {
         ansicht={ansicht}
         setAnsicht={setAnsicht}
         ich={ich}
-        onNameWechseln={() => setIchId("")}
+        onNameWechseln={() => setNameWaehlen(true)}
         anzahlOffen={aufDemBoard.length}
         anzahlArchiv={archivierte.length}
         admin={admin}
@@ -632,7 +657,10 @@ function StartFehler({ text, onNochmal }) {
  * "Weiter als …" - ein Tipp statt zwei.
  */
 function NamensAuswahl({ mitarbeiter, letzterName, onWahl, admin, onAdmin }) {
-  const letzter = mitarbeiter.find(m => m.name === letzterName);
+  /* Nur die Leute aus der Schweißerei. Simon steht im Bereich 'buero'
+     und gehört nicht auf die Kacheln. */
+  const auswahl = mitarbeiter.filter(m => m.bereich === BEREICH);
+  const letzter = auswahl.find(m => m.name === letzterName);
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6 relative">
@@ -663,7 +691,7 @@ function NamensAuswahl({ mitarbeiter, letzterName, onWahl, admin, onAdmin }) {
         ) : null}
 
         <div className="grid gap-4 sm:grid-cols-3">
-          {mitarbeiter.map(m => (
+          {auswahl.map(m => (
             <button key={m.id} onClick={() => onWahl(m)}
                     className="bg-panel border border-line rounded-2xl px-6 py-8 text-xl font-bold
                                hover:border-accent hover:bg-panel2 transition active:scale-[0.98]">
@@ -672,7 +700,7 @@ function NamensAuswahl({ mitarbeiter, letzterName, onWahl, admin, onAdmin }) {
           ))}
         </div>
 
-        {mitarbeiter.length === 0 ? (
+        {auswahl.length === 0 ? (
           <p className="text-muted mt-6">
             Es sind noch keine Mitarbeiter hinterlegt.
           </p>
@@ -754,8 +782,12 @@ function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, anzahlOffen, anza
                   title="Namen wechseln"
                   className="flex items-center gap-2 bg-panel border border-line rounded-xl
                              px-4 py-2.5 min-h-11 hover:border-accent transition">
-            <span className="text-muted text-xs hidden sm:inline">angemeldet</span>
-            <span className="font-semibold text-sm">{ich ? ich.name : "—"}</span>
+            <span className="text-muted text-xs hidden sm:inline">
+              {ich ? "angemeldet" : ""}
+            </span>
+            <span className={"font-semibold text-sm " + (ich ? "" : "text-warn")}>
+              {ich ? ich.name : "Name wählen"}
+            </span>
             <span className="text-muted text-xs">↩</span>
           </button>
 
@@ -1635,6 +1667,7 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
   }
 
   async function erledigtUmschalten(pos) {
+    if (!ichId) { melde("Dafür oben rechts einen Namen wählen.", "bad"); return; }
     const neu = !pos.erledigt;
     const { error } = await db.from("positionen").update({
       erledigt: neu,
@@ -1647,6 +1680,7 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
   }
 
   async function abschliessen() {
+    if (!ichId) { melde("Dafür oben rechts einen Namen wählen.", "bad"); return; }
     const { error } = await db.from("auftraege").update({
       status: "abgeschlossen",
       abgeschlossen_am: new Date().toISOString(),
@@ -1723,6 +1757,17 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
           </Knopf>
         ) : null}
       </div>
+
+      {/* Rückfallebene: greift nur, wenn die Admin-Kennung in der
+          Datenbank fehlt (Update-03 nicht gelaufen). */}
+      {!ichId ? (
+        <div className="bg-warn/10 border border-warn/40 rounded-2xl px-5 py-4 mb-5 text-sm">
+          <b className="text-warn">Kein Name gewählt.</b>
+          <span className="text-muted"> Ändern und Löschen geht, Zeiten buchen und
+          Abhaken erst nach der Namenswahl oben rechts — sonst stünde der falsche
+          Name in der Historie.</span>
+        </div>
+      ) : null}
 
       {/* Zwei Spalten: Auftrag links, laufende Kommentare rechts.
           Unterhalb von lg rutscht die Spalte unter den Auftrag. */}
