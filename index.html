@@ -10,6 +10,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"></script>
 
 <style type="text/tailwindcss">
@@ -98,11 +99,8 @@ const SUPABASE_KEY = "sb_publishable_bKycBdawzkSItE7G0YVamQ_ikkJMm0j";
    Das ist eine Bedienschranke gegen versehentliches Öffnen - kein
    Datenschutz. Wer die Adresse und den Schlüssel oben kennt, kommt
    an die Daten. Siehe docs/entscheidungen.md (E-03). */
-const PIN = "2017";
-
-/* Zweiter PIN für den Admin-Bereich: Aufträge ändern und löschen,
-   Positionen bearbeiten. Muss ein ANDERER sein als der obere - den
-   kennen alle in der Werkstatt.
+/* PIN für den Admin-Bereich: Aufträge ändern und löschen, Positionen
+   bearbeiten. Der normale Werkstattbetrieb braucht keinen PIN mehr.
    >>> Vor dem Einsatz ändern. <<< */
 const ADMIN_PIN = "9317";
 
@@ -427,49 +425,6 @@ function LoeschDialog({ titel, text, onJa, onSchliessen }) {
    Hauptanwendung
    ===================================================================== */
 
-function App() {
-  const [entsperrt, setEntsperrt] = useState(() => {
-    try { return sessionStorage.getItem("wsa_ok") === "1"; } catch (e) { return false; }
-  });
-
-  if (!entsperrt) return <PinSperre onOk={() => setEntsperrt(true)} />;
-  return <Anwendung />;
-}
-
-function PinSperre({ onOk }) {
-  const [wert, setWert] = useState("");
-  const [fehler, setFehler] = useState("");
-
-  function pruefen(e) {
-    e.preventDefault();
-    if (wert.trim() === PIN) {
-      try { sessionStorage.setItem("wsa_ok", "1"); } catch (err) {}
-      onOk();
-    } else {
-      setFehler("Falscher PIN.");
-      setWert("");
-    }
-  }
-
-  return (
-    <div className="min-h-screen flex items-center justify-center p-6">
-      <form onSubmit={pruefen}
-            className="bg-panel border border-line rounded-2xl p-8 w-full max-w-sm text-center">
-        <div className="text-4xl mb-3">🔧</div>
-        <h1 className="text-xl font-bold">Auftragsübersicht</h1>
-        <p className="text-muted text-sm mt-1 mb-6">Schweißerei · Bitte PIN eingeben.</p>
-        <input type="password" inputMode="numeric" autoFocus value={wert}
-               onChange={e => { setWert(e.target.value); setFehler(""); }}
-               className={eingabeKlasse + " text-center text-2xl tracking-[0.4em]"}
-               placeholder="PIN" />
-        <div className="text-bad text-sm h-5 mt-2">{fehler}</div>
-        <Knopf type="submit" className="w-full mt-2">Öffnen</Knopf>
-      </form>
-    </div>
-  );
-}
-
-
 function Anwendung() {
   const [ansicht, setAnsicht] = useState({ name: "board" });
   const [mitarbeiter, setMitarbeiter] = useState([]);
@@ -508,10 +463,22 @@ function Anwendung() {
       .from("v_auftrag_uebersicht")
       .select("*")
       .eq("bereich", BEREICH)
+      .order("sortierung", { ascending: true })
       .order("erstellt_am", { ascending: false });
     if (error) throw error;
     setAuftraege(data || []);
   }, []);
+
+  /* Reihenfolge nach dem Ziehen festhalten. Zehnerschritte, damit ein
+     neuer Auftrag mit 0 immer oben landet. */
+  const sortierungSpeichern = useCallback(async (ids) => {
+    const ergebnisse = await Promise.all(
+      ids.map((id, i) => db.from("auftraege").update({ sortierung: i * 10 }).eq("id", id))
+    );
+    const fehler = ergebnisse.find(r => r.error);
+    if (fehler) { melde("Reihenfolge konnte nicht gespeichert werden: " + fehler.error.message, "bad"); }
+    await ladeAuftraege();
+  }, [ladeAuftraege, melde]);
 
   const ladeAlles = useCallback(async () => {
     setLaedt(true);
@@ -548,8 +515,34 @@ function Anwendung() {
       </main>
     );
   }
+  const toastBlock = toast ? (
+    <div className={"fixed left-1/2 -translate-x-1/2 bottom-6 z-[60] px-5 py-3.5 rounded-xl " +
+                    "border shadow-2xl text-base max-w-[92vw] " +
+                    (toast.art === "bad"
+                      ? "bg-[#2a1215] border-bad text-[#fecaca]"
+                      : "bg-[#0b1220] border-line2 text-text")}>
+      {toast.text}
+    </div>
+  ) : null;
+
+  const adminBlock = adminDialog ? (
+    <AdminAnmeldung
+      onOk={() => { setAdmin(true); setAdminDialog(false); melde("Admin-Modus aktiv."); }}
+      onSchliessen={() => setAdminDialog(false)}
+    />
+  ) : null;
+
+  const adminUmschalten = () => admin ? setAdmin(false) : setAdminDialog(true);
+
   if (!ichId) {
-    return <NamensAuswahl mitarbeiter={mitarbeiter} letzterName={letzterName} onWahl={anmelden} />;
+    return (
+      <React.Fragment>
+        <NamensAuswahl mitarbeiter={mitarbeiter} letzterName={letzterName} onWahl={anmelden}
+                       admin={admin} onAdmin={adminUmschalten} />
+        {adminBlock}
+        {toastBlock}
+      </React.Fragment>
+    );
   }
 
   return (
@@ -562,7 +555,7 @@ function Anwendung() {
         anzahlOffen={aufDemBoard.length}
         anzahlArchiv={archivierte.length}
         admin={admin}
-        onAdmin={() => admin ? setAdmin(false) : setAdminDialog(true)}
+        onAdmin={adminUmschalten}
       />
 
       {admin ? (
@@ -575,7 +568,8 @@ function Anwendung() {
         {ansicht.name === "board" ? (
           <Board auftraege={aufDemBoard}
                  onOeffnen={id => setAnsicht({ name: "detail", id })}
-                 onNeu={() => setAnsicht({ name: "neu" })} />
+                 onNeu={() => setAnsicht({ name: "neu" })}
+                 onSortiert={sortierungSpeichern} />
         ) : null}
 
         {ansicht.name === "archiv" ? (
@@ -603,22 +597,8 @@ function Anwendung() {
         ) : null}
       </main>
 
-      {adminDialog ? (
-        <AdminAnmeldung
-          onOk={() => { setAdmin(true); setAdminDialog(false); melde("Admin-Modus aktiv."); }}
-          onSchliessen={() => setAdminDialog(false)}
-        />
-      ) : null}
-
-      {toast ? (
-        <div className={"fixed left-1/2 -translate-x-1/2 bottom-6 z-[60] px-5 py-3.5 rounded-xl " +
-                        "border shadow-2xl text-base max-w-[92vw] " +
-                        (toast.art === "bad"
-                          ? "bg-[#2a1215] border-bad text-[#fecaca]"
-                          : "bg-[#0b1220] border-line2 text-text")}>
-          {toast.text}
-        </div>
-      ) : null}
+      {adminBlock}
+      {toastBlock}
     </div>
   );
 }
@@ -651,11 +631,21 @@ function StartFehler({ text, onNochmal }) {
  * Kollegen buchen. Für den Normalfall gibt es die Schaltfläche
  * "Weiter als …" - ein Tipp statt zwei.
  */
-function NamensAuswahl({ mitarbeiter, letzterName, onWahl }) {
+function NamensAuswahl({ mitarbeiter, letzterName, onWahl, admin, onAdmin }) {
   const letzter = mitarbeiter.find(m => m.name === letzterName);
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-6">
+    <div className="min-h-screen flex items-center justify-center p-6 relative">
+      {/* Admin-Zugang schon hier, damit man dafür nicht erst einen
+          Namen wählen muss. */}
+      <button onClick={onAdmin}
+              title={admin ? "Admin-Modus beenden" : "Admin-Bereich freischalten"}
+              className={"absolute top-5 right-5 px-4 py-2.5 rounded-xl text-sm min-h-11 border transition " +
+                (admin ? "bg-bad/20 border-bad text-bad font-semibold"
+                       : "bg-panel border-line text-muted hover:text-text")}>
+        {admin ? "🔓 Admin" : "🔒 Admin"}
+      </button>
+
       <div className="w-full max-w-2xl text-center">
         <div className="text-4xl mb-3">🔧</div>
         <h1 className="text-2xl font-bold">Wer bist du?</h1>
@@ -785,7 +775,60 @@ function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, anzahlOffen, anza
 
 /* ---------- Board ---------------------------------------------------- */
 
-function Board({ auftraege, onOeffnen, onNeu }) {
+/**
+ * Eine Spalte des Boards. Die Karten lassen sich am Griff ziehen und
+ * damit in eine Warteschlangen-Reihenfolge bringen - oben zuerst.
+ *
+ * Sortable verschiebt dabei die DOM-Knoten selbst. Danach lesen wir die
+ * neue Reihenfolge aus dem DOM und geben sie an React weiter; weil der
+ * neue Zustand dann genau dem entspricht, was ohnehin schon dasteht,
+ * springt nichts.
+ */
+function BoardSpalte({ spalte, liste, onOeffnen, onSortiert }) {
+  const behaelter = useRef(null);
+
+  useEffect(() => {
+    if (!behaelter.current || !window.Sortable) return;
+    const s = window.Sortable.create(behaelter.current, {
+      animation: 150,
+      handle: ".griff",
+      draggable: ".karte",
+      ghostClass: "opacity-30",
+      /* Auf dem Tablet zieht man mit dem Finger - ohne kurze Verzögerung
+         löst schon das Scrollen einen Zug aus. */
+      delay: 120,
+      delayOnTouchOnly: true,
+      onEnd: (e) => {
+        if (e.oldIndex === e.newIndex) return;
+        const ids = Array.from(behaelter.current.querySelectorAll(".karte"))
+          .map(el => el.dataset.id);
+        onSortiert(ids);
+      }
+    });
+    return () => s.destroy();
+  }, [onSortiert]);
+
+  return (
+    <section className={"rounded-2xl border p-4 " + spalte.rahmen}>
+      <h2 className="flex items-center gap-2.5 text-sm font-bold tracking-wider uppercase mb-4">
+        <StatusPunkt status={spalte.status} />
+        <span className={spalte.schrift}>{spalte.titel}</span>
+        <span className="text-muted ml-auto">{liste.length}</span>
+      </h2>
+
+      <div ref={behaelter} className="grid gap-3 min-h-[3rem]">
+        {liste.map(a => <Kachel key={a.id} a={a} onClick={() => onOeffnen(a.id)} />)}
+      </div>
+
+      {liste.length === 0 ? (
+        <p className="text-muted text-sm text-center py-6">—</p>
+      ) : null}
+    </section>
+  );
+}
+
+
+function Board({ auftraege, onOeffnen, onNeu, onSortiert }) {
   return (
     <div>
       <div className="flex items-center justify-between gap-4 mb-6">
@@ -803,26 +846,11 @@ function Board({ auftraege, onOeffnen, onNeu }) {
         /* Drei Spalten nebeneinander im Landscape des Tablets, darunter
            gestapelt - sonst würden die Kacheln zu schmal zum Antippen. */
         <div className="grid gap-5 lg:grid-cols-3 items-start">
-          {SPALTEN.map(s => {
-            const liste = auftraege.filter(a => a.status === s.status);
-            return (
-              <section key={s.status} className={"rounded-2xl border p-4 " + s.rahmen}>
-                <h2 className="flex items-center gap-2.5 text-sm font-bold tracking-wider uppercase mb-4">
-                  <StatusPunkt status={s.status} />
-                  <span className={s.schrift}>{s.titel}</span>
-                  <span className="text-muted ml-auto">{liste.length}</span>
-                </h2>
-
-                {liste.length === 0 ? (
-                  <p className="text-muted text-sm text-center py-6">—</p>
-                ) : (
-                  <div className="grid gap-3">
-                    {liste.map(a => <Kachel key={a.id} a={a} onClick={() => onOeffnen(a.id)} />)}
-                  </div>
-                )}
-              </section>
-            );
-          })}
+          {SPALTEN.map(s => (
+            <BoardSpalte key={s.status} spalte={s}
+                         liste={auftraege.filter(a => a.status === s.status)}
+                         onOeffnen={onOeffnen} onSortiert={onSortiert} />
+          ))}
         </div>
       )}
     </div>
@@ -836,9 +864,21 @@ function Kachel({ a, onClick }) {
   const fertig   = gesamt > 0 && erledigt === gesamt;
 
   return (
-    <button onClick={onClick}
-            className="text-left bg-panel border border-line rounded-2xl p-5 w-full
-                       hover:border-accent hover:bg-panel2 transition active:scale-[0.99]">
+    <div data-id={a.id}
+         className="karte bg-panel border border-line rounded-2xl overflow-hidden
+                    hover:border-accent transition">
+      {/* Griff zum Ziehen. Getrennt von der Klickfläche, damit ein Tipp
+          auf die Karte weiterhin den Auftrag öffnet. */}
+      <div className="griff flex items-center justify-center gap-2 py-2 text-muted/60 text-sm
+                      cursor-grab active:cursor-grabbing select-none border-b border-line/60
+                      hover:text-muted hover:bg-panel2 transition"
+           title="Zum Sortieren ziehen">
+        ⠿ <span className="text-xs">ziehen</span>
+      </div>
+
+      <div onClick={onClick} role="button" tabIndex={0}
+           onKeyDown={e => { if (e.key === "Enter" || e.key === " ") onClick(); }}
+           className="text-left p-5 cursor-pointer hover:bg-panel2 transition">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="font-bold text-lg truncate">{a.beleg_nr || "ohne Beleg-Nr."}</div>
@@ -875,7 +915,8 @@ function Kachel({ a, onClick }) {
       {a.status === "abgeschlossen" ? (
         <div className="mt-3 text-xs text-muted">Zum Archivieren antippen</div>
       ) : null}
-    </button>
+      </div>
+    </div>
   );
 }
 
@@ -1502,6 +1543,12 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
   const [bilder, setBilder] = useState({});
   const [kLaedt, setKLaedt] = useState(true);
 
+  /* Die Adresse des PDFs wird schon beim Laden geholt, damit der Knopf
+     ein echter Link sein kann. Würde man sie erst beim Antippen holen,
+     käme das Öffnen nach einem `await` - und Tablet-Browser blockieren
+     das dann als ungewolltes Pop-up. */
+  const [pdfUrl, setPdfUrl] = useState("");
+
   const ladeKommentare = useCallback(async () => {
     const { data, error } = await db.from("kommentare")
       .select("*").eq("auftrag_id", auftragId)
@@ -1533,6 +1580,16 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
       if (p.error) throw p.error;
       setAuftrag(a.data);
       setPositionen(p.data || []);
+
+      if (a.data && a.data.dokument_pfad) {
+        /* Acht Stunden - deckt eine Schicht ab, ohne dass der Link
+           zwischendurch abläuft. */
+        const { data: sig } = await db.storage.from(BUCKET)
+          .createSignedUrl(a.data.dokument_pfad, 28800);
+        setPdfUrl(sig && sig.signedUrl ? sig.signedUrl : "");
+      } else {
+        setPdfUrl("");
+      }
 
       const ids = (p.data || []).map(x => x.id);
       if (ids.length > 0) {
@@ -1575,14 +1632,6 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
   async function nachAenderung() {
     await laden();
     await onGeaendert();
-  }
-
-  async function pdfOeffnen() {
-    if (!auftrag || !auftrag.dokument_pfad) return;
-    const { data, error } = await db.storage.from(BUCKET)
-      .createSignedUrl(auftrag.dokument_pfad, 3600);
-    if (error) { melde("PDF konnte nicht geöffnet werden: " + error.message, "bad"); return; }
-    window.open(data.signedUrl, "_blank");
   }
 
   async function erledigtUmschalten(pos) {
@@ -1696,9 +1745,20 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
         </div>
 
         <div className="flex flex-wrap gap-3 mt-5">
-          {auftrag.dokument_pfad
-            ? <Knopf art="still" klein onClick={pdfOeffnen}>📄 Original-PDF ansehen</Knopf>
-            : <span className="text-muted text-sm self-center">Kein PDF hinterlegt.</span>}
+          {!auftrag.dokument_pfad ? (
+            <span className="text-muted text-sm self-center">Kein PDF hinterlegt.</span>
+          ) : pdfUrl ? (
+            /* Echter Link statt Knopf mit Skript - so blockiert kein
+               Tablet-Browser das Öffnen. */
+            <a href={pdfUrl} target="_blank" rel="noopener noreferrer"
+               className="inline-flex items-center justify-center gap-2 rounded-xl font-semibold
+                          transition select-none px-4 py-2.5 text-sm min-h-11
+                          bg-panel2 border border-line2 text-text hover:border-accent">
+              📄 Original-PDF ansehen
+            </a>
+          ) : (
+            <span className="text-muted text-sm self-center">PDF wird vorbereitet…</span>
+          )}
           <Knopf art="still" klein onClick={() => setDialog({ art: "skizzen" })}>
             🖼 Skizzen/Fotos
             {bildAnzahl > 0 ? <span className="opacity-70">({bildAnzahl})</span> : null}
@@ -2345,7 +2405,7 @@ function PositionDialog({ pos, auftragId, naechsteNr, melde, onSchliessen, onGes
 /* ---------- Start ---------------------------------------------------- */
 
 try {
-  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  ReactDOM.createRoot(document.getElementById("root")).render(<Anwendung />);
 } catch (e) {
   document.getElementById("fehler").style.display = "block";
   document.getElementById("fehlerText").textContent = e.message || String(e);
