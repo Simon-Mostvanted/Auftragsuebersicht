@@ -478,10 +478,11 @@ function Anwendung() {
   const [startFehler, setStartFehler] = useState("");
   const [toast, setToast] = useState(null);
 
-  /* Wer steht gerade am Tablet. Kein Login - nur eine Vorauswahl, damit
-     die Dropdowns in den Dialogen schon gefüllt sind. Überall änderbar. */
-  const [ichId, setIchId] = useState(() => {
-    try { return localStorage.getItem("wsa_ich") || ""; } catch (e) { return ""; }
+  /* Wer arbeitet gerade am Tablet. Wird bei jedem Öffnen neu abgefragt;
+     gemerkt wird nur der letzte Name für die "Weiter als …"-Schaltfläche. */
+  const [ichId, setIchId] = useState("");
+  const [letzterName, setLetzterName] = useState(() => {
+    try { return localStorage.getItem("wsa_letzter_name") || ""; } catch (e) { return ""; }
   });
 
   /* Admin-Modus: Aufträge ändern und löschen, Positionen bearbeiten.
@@ -496,9 +497,10 @@ function Anwendung() {
     setTimeout(() => setToast(null), art === "bad" ? 6000 : 3000);
   }, []);
 
-  const setzeIch = useCallback((id) => {
-    setIchId(id);
-    try { localStorage.setItem("wsa_ich", id); } catch (e) {}
+  const anmelden = useCallback((m) => {
+    setIchId(m.id);
+    setLetzterName(m.name);
+    try { localStorage.setItem("wsa_letzter_name", m.name); } catch (e) {}
   }, []);
 
   const ladeAuftraege = useCallback(async () => {
@@ -534,15 +536,29 @@ function Anwendung() {
 
   const aufDemBoard = useMemo(() => auftraege.filter(a => a.status !== "archiviert"), [auftraege]);
   const archivierte = useMemo(() => auftraege.filter(a => a.status === "archiviert"), [auftraege]);
+  const ich = useMemo(() => mitarbeiter.find(m => m.id === ichId), [mitarbeiter, ichId]);
+
+  /* Vor der Namensauswahl gibt es nichts zu sehen - erst danach weiß die
+     App, wem sie Buchungen zuschreiben soll. */
+  if (laedt) return <Lade text="Wird geladen…" />;
+  if (startFehler) {
+    return (
+      <main className="max-w-3xl mx-auto p-6">
+        <StartFehler text={startFehler} onNochmal={ladeAlles} />
+      </main>
+    );
+  }
+  if (!ichId) {
+    return <NamensAuswahl mitarbeiter={mitarbeiter} letzterName={letzterName} onWahl={anmelden} />;
+  }
 
   return (
     <div className="min-h-screen flex flex-col">
       <Kopfzeile
         ansicht={ansicht}
         setAnsicht={setAnsicht}
-        mitarbeiter={mitarbeiter}
-        ichId={ichId}
-        setzeIch={setzeIch}
+        ich={ich}
+        onNameWechseln={() => setIchId("")}
         anzahlOffen={aufDemBoard.length}
         anzahlArchiv={archivierte.length}
         admin={admin}
@@ -556,23 +572,17 @@ function Anwendung() {
       ) : null}
 
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 pb-24">
-        {laedt ? <Lade text="Aufträge werden geladen…" /> : null}
-
-        {!laedt && startFehler ? (
-          <StartFehler text={startFehler} onNochmal={ladeAlles} />
-        ) : null}
-
-        {!laedt && !startFehler && ansicht.name === "board" ? (
+        {ansicht.name === "board" ? (
           <Board auftraege={aufDemBoard}
                  onOeffnen={id => setAnsicht({ name: "detail", id })}
                  onNeu={() => setAnsicht({ name: "neu" })} />
         ) : null}
 
-        {!laedt && !startFehler && ansicht.name === "archiv" ? (
+        {ansicht.name === "archiv" ? (
           <Archiv auftraege={archivierte} onOeffnen={id => setAnsicht({ name: "detail", id })} />
         ) : null}
 
-        {!laedt && !startFehler && ansicht.name === "neu" ? (
+        {ansicht.name === "neu" ? (
           <NeuerAuftrag
             onFertig={async () => { await ladeAuftraege(); setAnsicht({ name: "board" }); melde("Auftrag angelegt."); }}
             onAbbruch={() => setAnsicht({ name: "board" })}
@@ -580,7 +590,7 @@ function Anwendung() {
           />
         ) : null}
 
-        {!laedt && !startFehler && ansicht.name === "detail" ? (
+        {ansicht.name === "detail" ? (
           <Detail
             auftragId={ansicht.id}
             mitarbeiter={mitarbeiter}
@@ -633,6 +643,56 @@ function StartFehler({ text, onNochmal }) {
 }
 
 
+/**
+ * Namensauswahl nach dem PIN - wie in der Bestell-App.
+ *
+ * Erscheint bei jedem Öffnen neu. Das ist Absicht: Am gemeinsamen Tablet
+ * würde ein gemerkter Name sonst dazu führen, dass alle auf denselben
+ * Kollegen buchen. Für den Normalfall gibt es die Schaltfläche
+ * "Weiter als …" - ein Tipp statt zwei.
+ */
+function NamensAuswahl({ mitarbeiter, letzterName, onWahl }) {
+  const letzter = mitarbeiter.find(m => m.name === letzterName);
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-6">
+      <div className="w-full max-w-2xl text-center">
+        <div className="text-4xl mb-3">🔧</div>
+        <h1 className="text-2xl font-bold">Wer bist du?</h1>
+        <p className="text-muted mt-2 mb-8">
+          Wähle deinen Namen — gebuchte Zeiten und erledigte Positionen werden dir zugeordnet.
+        </p>
+
+        {letzter ? (
+          <button onClick={() => onWahl(letzter)}
+                  className="w-full mb-6 bg-panel border border-line2 rounded-2xl px-6 py-4
+                             text-left hover:border-accent transition">
+            <span className="text-muted text-sm">Zuletzt hier</span>
+            <span className="block text-lg font-semibold">↩ Weiter als {letzter.name}</span>
+          </button>
+        ) : null}
+
+        <div className="grid gap-4 sm:grid-cols-3">
+          {mitarbeiter.map(m => (
+            <button key={m.id} onClick={() => onWahl(m)}
+                    className="bg-panel border border-line rounded-2xl px-6 py-8 text-xl font-bold
+                               hover:border-accent hover:bg-panel2 transition active:scale-[0.98]">
+              {m.name}
+            </button>
+          ))}
+        </div>
+
+        {mitarbeiter.length === 0 ? (
+          <p className="text-muted mt-6">
+            Es sind noch keine Mitarbeiter hinterlegt.
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+
 function AdminAnmeldung({ onOk, onSchliessen }) {
   const [wert, setWert] = useState("");
   const [fehler, setFehler] = useState("");
@@ -669,7 +729,7 @@ function AdminAnmeldung({ onOk, onSchliessen }) {
 }
 
 
-function Kopfzeile({ ansicht, setAnsicht, mitarbeiter, ichId, setzeIch, anzahlOffen, anzahlArchiv, admin, onAdmin }) {
+function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, anzahlOffen, anzahlArchiv, admin, onAdmin }) {
   const reiter = [
     { id: "board",  text: "Aufträge", zahl: anzahlOffen },
     { id: "archiv", text: "Archiv",   zahl: anzahlArchiv }
@@ -700,12 +760,14 @@ function Kopfzeile({ ansicht, setAnsicht, mitarbeiter, ichId, setzeIch, anzahlOf
         </nav>
 
         <div className="flex items-center gap-2">
-          <span className="text-xs text-muted hidden sm:inline">Ich bin</span>
-          <select value={ichId} onChange={e => setzeIch(e.target.value)}
-                  className="bg-panel border border-line rounded-xl px-3 py-2.5 text-sm min-h-11 outline-none focus:border-accent">
-            <option value="">— Name wählen —</option>
-            {mitarbeiter.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-          </select>
+          <button onClick={onNameWechseln}
+                  title="Namen wechseln"
+                  className="flex items-center gap-2 bg-panel border border-line rounded-xl
+                             px-4 py-2.5 min-h-11 hover:border-accent transition">
+            <span className="text-muted text-xs hidden sm:inline">angemeldet</span>
+            <span className="font-semibold text-sm">{ich ? ich.name : "—"}</span>
+            <span className="text-muted text-xs">↩</span>
+          </button>
 
           <button onClick={onAdmin}
                   title={admin ? "Admin-Modus beenden" : "Admin-Bereich freischalten"}
@@ -1247,9 +1309,7 @@ function KommentarSpalte({ kommentare, bilder, laedt, ichId, nameVon, melde, auf
           <Knopf klein onClick={senden} disabled={sendet || !text.trim()}>
             {sendet ? "…" : "Hinzufügen"}
           </Knopf>
-          <span className="text-muted text-xs">
-            {ichId ? "als " + nameVon(ichId) : "ohne Namen"}
-          </span>
+          <span className="text-muted text-xs">als {nameVon(ichId)}</span>
         </div>
       </div>
 
@@ -1526,10 +1586,6 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
   }
 
   async function erledigtUmschalten(pos) {
-    if (!pos.erledigt && !ichId) {
-      melde("Bitte oben rechts den eigenen Namen wählen.", "bad");
-      return;
-    }
     const neu = !pos.erledigt;
     const { error } = await db.from("positionen").update({
       erledigt: neu,
@@ -1542,7 +1598,6 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
   }
 
   async function abschliessen() {
-    if (!ichId) { melde("Bitte oben rechts den eigenen Namen wählen.", "bad"); return; }
     const { error } = await db.from("auftraege").update({
       status: "abgeschlossen",
       abgeschlossen_am: new Date().toISOString(),
@@ -1771,7 +1826,7 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
       </div>{/* Ende Zweispalter */}
 
       {dialog && dialog.art === "zeit" ? (
-        <ZeitDialog pos={dialog.pos} mitarbeiter={mitarbeiter} ichId={ichId} melde={melde}
+        <ZeitDialog pos={dialog.pos} ichId={ichId} ichName={nameVon(ichId)} melde={melde}
                     onSchliessen={() => setDialog(null)}
                     onGebucht={async () => { setDialog(null); await inArbeitSetzen(); await nachAenderung(); }} />
       ) : null}
@@ -2081,8 +2136,7 @@ function PositionZeile({ p, minuten, buchungen, nameVon, istAktiv, admin,
 }
 
 
-function ZeitDialog({ pos, mitarbeiter, ichId, melde, onSchliessen, onGebucht }) {
-  const [maId, setMaId] = useState(ichId || "");
+function ZeitDialog({ pos, ichName, ichId, melde, onSchliessen, onGebucht }) {
   const [stunden, setStunden] = useState("");
   const [minuten, setMinuten] = useState("");
   const [notiz, setNotiz] = useState("");
@@ -2097,11 +2151,10 @@ function ZeitDialog({ pos, mitarbeiter, ichId, melde, onSchliessen, onGebucht })
   }
 
   async function buchen() {
-    if (!maId) { melde("Bitte einen Namen wählen.", "bad"); return; }
     if (gesamt <= 0) { melde("Bitte eine Zeit größer als null eingeben.", "bad"); return; }
     setSpeichert(true);
     const { error } = await db.from("zeitbuchungen").insert({
-      position_id: pos.id, mitarbeiter_id: maId, minuten: gesamt, notiz: notiz.trim() || null
+      position_id: pos.id, mitarbeiter_id: ichId, minuten: gesamt, notiz: notiz.trim() || null
     });
     if (error) { melde("Buchen fehlgeschlagen: " + error.message, "bad"); setSpeichert(false); return; }
     melde(minutenText(gesamt) + " gebucht.");
@@ -2111,12 +2164,11 @@ function ZeitDialog({ pos, mitarbeiter, ichId, melde, onSchliessen, onGebucht })
   return (
     <Dialog titel="Zeit buchen" unterzeile={pos.bezeichnung} onSchliessen={onSchliessen}>
       <div className="space-y-5">
-        <Feld label="Wer hat gearbeitet?">
-          <select value={maId} onChange={e => setMaId(e.target.value)} className={eingabeKlasse}>
-            <option value="">— Name wählen —</option>
-            {mitarbeiter.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-          </select>
-        </Feld>
+        {/* Kein Namensfeld mehr - gebucht wird auf den angemeldeten Namen. */}
+        <div className="flex items-center gap-2.5 bg-chip border border-line rounded-xl px-4 py-3">
+          <span className="text-muted text-sm">Wird gebucht auf</span>
+          <span className="font-semibold">{ichName}</span>
+        </div>
 
         <div>
           <span className="block text-xs text-muted mb-1.5 font-medium">Dauer</span>
