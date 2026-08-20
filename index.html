@@ -1191,59 +1191,137 @@ function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
 }
 
 
-/* ---------- Kommentare mit Skizzen und Fotos -------------------------- */
+/* ---------- Kommentare und Skizzen ------------------------------------ */
 
 /**
- * Eingeklappter Bereich am Kopf der Detailansicht. Zeigt zugeklappt nur
- * die Anzahl - im Alltag interessiert die Positionsliste, die Kommentare
- * sind Nachschlagewerk.
+ * Laufende Kommentarspalte rechts neben dem Auftrag. Immer sichtbar,
+ * nichts zum Aufklappen - im Werkstattalltag sind die Absprachen so
+ * wichtig wie die Positionsliste selbst.
+ *
+ * Bilder werden hier nur als Vorschaubild gezeigt; hochgeladen und in
+ * groß angesehen werden sie über "Skizzen/Fotos" im Auftragskopf.
  */
-function Kommentare({ auftragId, mitarbeiter, ichId, melde, nameVon }) {
-  const [offen, setOffen] = useState(false);
-  const [liste, setListe] = useState([]);
-  const [laedt, setLaedt] = useState(true);
+function KommentarSpalte({ kommentare, bilder, laedt, ichId, nameVon, melde, auftragId, nachladen }) {
   const [text, setText] = useState("");
-  const [bild, setBild] = useState(null);
   const [sendet, setSendet] = useState(false);
-  const [bilder, setBilder] = useState({});   // id -> angezeigte Adresse
   const [loeschen, setLoeschen] = useState(null);
-  const bildRef = useRef(null);
-
-  const laden = useCallback(async () => {
-    const { data, error } = await db.from("kommentare")
-      .select("*").eq("auftrag_id", auftragId)
-      .order("erstellt_am", { ascending: false });
-    if (error) { melde("Kommentare: " + error.message, "bad"); setLaedt(false); return; }
-    setListe(data || []);
-    setLaedt(false);
-
-    /* Bilder liegen im privaten Bucket - für die Anzeige braucht jedes
-       eine zeitlich begrenzte Adresse. */
-    const mitBild = (data || []).filter(k => k.bild_pfad);
-    if (mitBild.length > 0) {
-      const pfade = mitBild.map(k => k.bild_pfad);
-      const { data: urls } = await db.storage.from(BUCKET).createSignedUrls(pfade, 3600);
-      const karte = {};
-      (urls || []).forEach((u, i) => { if (u && u.signedUrl) karte[mitBild[i].id] = u.signedUrl; });
-      setBilder(karte);
-    }
-  }, [auftragId, melde]);
-
-  useEffect(() => { laden(); }, [laden]);
 
   async function senden() {
-    if (!text.trim() && !bild) { melde("Bitte etwas schreiben oder ein Bild wählen.", "bad"); return; }
+    if (!text.trim()) return;
+    setSendet(true);
+    const { error } = await db.from("kommentare").insert({
+      auftrag_id: auftragId,
+      mitarbeiter_id: ichId || null,
+      text: text.trim()
+    });
+    setSendet(false);
+    if (error) { melde("Speichern fehlgeschlagen: " + error.message, "bad"); return; }
+    setText("");
+    await nachladen();
+  }
+
+  async function wirklichLoeschen(k) {
+    if (k.bild_pfad) await db.storage.from(BUCKET).remove([k.bild_pfad]);
+    const { error } = await db.from("kommentare").delete().eq("id", k.id);
+    setLoeschen(null);
+    if (error) { melde("Löschen fehlgeschlagen: " + error.message, "bad"); return; }
+    await nachladen();
+    melde("Kommentar gelöscht.");
+  }
+
+  return (
+    <aside className="bg-panel border border-line rounded-2xl flex flex-col lg:sticky lg:top-24
+                      lg:max-h-[calc(100vh-8rem)] overflow-hidden">
+      <div className="px-5 py-4 border-b border-line flex items-center gap-2.5">
+        <span className="text-lg">💬</span>
+        <h2 className="font-bold">Kommentare</h2>
+        <span className="text-muted text-sm ml-auto">{laedt ? "…" : kommentare.length}</span>
+      </div>
+
+      {/* Eingabe oben: Das Neueste steht direkt darunter. */}
+      <div className="px-5 py-4 border-b border-line">
+        <textarea rows="2" value={text} onChange={e => setText(e.target.value)}
+                  className={eingabeKlasse + " text-sm"}
+                  placeholder="Notiz, Hinweis, Absprache…" />
+        <div className="flex items-center gap-3 mt-2.5">
+          <Knopf klein onClick={senden} disabled={sendet || !text.trim()}>
+            {sendet ? "…" : "Hinzufügen"}
+          </Knopf>
+          <span className="text-muted text-xs">
+            {ichId ? "als " + nameVon(ichId) : "ohne Namen"}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        {laedt ? <p className="text-muted text-sm text-center py-4">lädt…</p> : null}
+        {!laedt && kommentare.length === 0 ? (
+          <p className="text-muted text-sm text-center py-6">
+            Noch nichts notiert.<br />Skizzen und Fotos über den Knopf im Auftragskopf.
+          </p>
+        ) : null}
+
+        {kommentare.map(k => (
+          <div key={k.id} className="border-l-2 border-line2 pl-3.5">
+            <div className="flex items-baseline gap-2 text-xs mb-1">
+              <span className="font-semibold text-sm">
+                {k.mitarbeiter_id ? nameVon(k.mitarbeiter_id) : "ohne Namen"}
+              </span>
+              <span className="text-muted">{datumZeitText(k.erstellt_am)}</span>
+              <button onClick={() => setLoeschen(k)}
+                      className="ml-auto text-muted hover:text-bad underline">×</button>
+            </div>
+            {k.text ? <p className="text-sm whitespace-pre-wrap">{k.text}</p> : null}
+            {k.bild_pfad && bilder[k.id] ? (
+              <a href={bilder[k.id]} target="_blank" rel="noopener noreferrer" className="block mt-2">
+                <img src={bilder[k.id]} alt="Skizze"
+                     className="w-full rounded-lg border border-line hover:border-accent transition" />
+              </a>
+            ) : null}
+            {k.bild_pfad && !bilder[k.id] ? (
+              <p className="text-muted text-xs mt-1">Bild wird geladen…</p>
+            ) : null}
+          </div>
+        ))}
+      </div>
+
+      {loeschen ? (
+        <LoeschDialog
+          titel="Kommentar löschen"
+          text={"Der Eintrag" + (loeschen.bild_pfad ? " samt Bild" : "") + " wird entfernt."}
+          onJa={() => wirklichLoeschen(loeschen)}
+          onSchliessen={() => setLoeschen(null)}
+        />
+      ) : null}
+    </aside>
+  );
+}
+
+
+/**
+ * Skizzen und Fotos zum Auftrag: hochladen und groß ansehen.
+ * Technisch dieselben Kommentare - nur die mit Bild.
+ */
+function SkizzenDialog({ kommentare, bilder, ichId, nameVon, melde, auftragId, nachladen, onSchliessen }) {
+  const [datei, setDatei] = useState(null);
+  const [text, setText] = useState("");
+  const [sendet, setSendet] = useState(false);
+  const [loeschen, setLoeschen] = useState(null);
+  const dateiRef = useRef(null);
+
+  const mitBild = kommentare.filter(k => k.bild_pfad);
+
+  async function hochladen() {
+    if (!datei) { melde("Bitte ein Bild wählen.", "bad"); return; }
     setSendet(true);
     try {
-      let pfad = null;
-      if (bild) {
-        const endung = (bild.name.split(".").pop() || "jpg").toLowerCase();
-        pfad = "kommentare/" + auftragId + "/" + Date.now() + "." + endung;
-        const { error } = await db.storage.from(BUCKET).upload(pfad, bild, {
-          contentType: bild.type || "image/jpeg", upsert: false
-        });
-        if (error) throw error;
-      }
+      const endung = (datei.name.split(".").pop() || "jpg").toLowerCase();
+      const pfad = "kommentare/" + auftragId + "/" + Date.now() + "." + endung;
+      const { error } = await db.storage.from(BUCKET).upload(pfad, datei, {
+        contentType: datei.type || "image/jpeg", upsert: false
+      });
+      if (error) throw error;
+
       const { error: kFehler } = await db.from("kommentare").insert({
         auftrag_id: auftragId,
         mitarbeiter_id: ichId || null,
@@ -1252,12 +1330,12 @@ function Kommentare({ auftragId, mitarbeiter, ichId, melde, nameVon }) {
       });
       if (kFehler) throw kFehler;
 
-      setText(""); setBild(null);
-      if (bildRef.current) bildRef.current.value = "";
-      await laden();
-      melde("Kommentar gespeichert.");
+      setDatei(null); setText("");
+      if (dateiRef.current) dateiRef.current.value = "";
+      await nachladen();
+      melde("Bild hinzugefügt.");
     } catch (e) {
-      melde("Speichern fehlgeschlagen: " + (e.message || e), "bad");
+      melde("Hochladen fehlgeschlagen: " + (e.message || e), "bad");
     } finally {
       setSendet(false);
     }
@@ -1268,97 +1346,82 @@ function Kommentare({ auftragId, mitarbeiter, ichId, melde, nameVon }) {
     const { error } = await db.from("kommentare").delete().eq("id", k.id);
     setLoeschen(null);
     if (error) { melde("Löschen fehlgeschlagen: " + error.message, "bad"); return; }
-    await laden();
-    melde("Kommentar gelöscht.");
+    await nachladen();
+    melde("Bild gelöscht.");
   }
 
   return (
-    <div className="bg-panel border border-line rounded-2xl mb-5 overflow-hidden">
-      <button onClick={() => setOffen(o => !o)}
-              className="w-full flex items-center gap-3 px-6 py-4 hover:bg-panel2 transition text-left">
-        <span className="text-xl">💬</span>
-        <span className="font-semibold">Kommentare & Skizzen</span>
-        <span className="text-muted text-sm">
-          {laedt ? "…" : liste.length === 0 ? "noch keine" : liste.length}
-        </span>
-        <span className="ml-auto text-muted text-sm">{offen ? "▲ zuklappen" : "▼ aufklappen"}</span>
-      </button>
-
-      {offen ? (
-        <div className="px-6 pb-6 border-t border-line pt-5">
-          {/* Neuer Kommentar */}
-          <div className="bg-chip border border-line rounded-xl p-4 mb-5">
-            <textarea rows="2" value={text} onChange={e => setText(e.target.value)}
-                      className={eingabeKlasse} placeholder="Notiz, Hinweis, Absprache…" />
-
-            {bild ? (
-              <div className="flex items-center gap-3 mt-3 bg-ok/10 border border-ok/40 rounded-xl px-4 py-3">
-                <span className="text-lg">🖼</span>
-                <span className="truncate mr-auto text-sm">{bild.name}</span>
-                <button onClick={() => { setBild(null); if (bildRef.current) bildRef.current.value = ""; }}
-                        className="text-muted hover:text-bad text-sm underline px-2 min-h-11">entfernen</button>
-              </div>
-            ) : (
-              <input ref={bildRef} type="file" accept="image/*"
-                     onChange={e => setBild(e.target.files[0] || null)}
-                     className="block w-full text-sm text-muted mt-3 file:mr-4 file:py-2.5 file:px-4
-                                file:rounded-xl file:border-0 file:bg-panel2 file:text-text
-                                file:font-semibold file:cursor-pointer hover:file:bg-line" />
-            )}
-
-            <div className="flex flex-wrap gap-3 mt-3 items-center">
-              <Knopf klein onClick={senden} disabled={sendet}>
-                {sendet ? "Speichert…" : "Hinzufügen"}
-              </Knopf>
-              <span className="text-muted text-xs">
-                {ichId ? "wird unter deinem Namen gespeichert" : "ohne Namen — oben rechts wählen"}
-              </span>
-            </div>
+    <Dialog titel="Skizzen & Fotos" unterzeile={mitBild.length + " zum Auftrag"}
+            onSchliessen={onSchliessen} breit>
+      {/* Hochladen */}
+      <div className="bg-chip border border-line rounded-xl p-4 mb-6">
+        {datei ? (
+          <div className="flex flex-wrap items-center gap-3 bg-ok/10 border border-ok/40 rounded-xl px-4 py-3">
+            <span className="text-lg">🖼</span>
+            <span className="truncate mr-auto text-sm">{datei.name}</span>
+            <button onClick={() => { setDatei(null); if (dateiRef.current) dateiRef.current.value = ""; }}
+                    className="text-muted hover:text-bad text-sm underline px-2 min-h-11">entfernen</button>
           </div>
+        ) : (
+          <input ref={dateiRef} type="file" accept="image/*"
+                 onChange={e => setDatei(e.target.files[0] || null)}
+                 className="block w-full text-sm text-muted file:mr-4 file:py-3 file:px-5
+                            file:rounded-xl file:border-0 file:bg-panel2 file:text-text
+                            file:font-semibold file:cursor-pointer hover:file:bg-line" />
+        )}
 
-          {/* Vorhandene Kommentare */}
-          {laedt ? <Lade text="Kommentare…" /> : null}
-          {!laedt && liste.length === 0 ? (
-            <p className="text-muted text-sm text-center py-4">Noch kein Kommentar.</p>
-          ) : null}
+        <input className={eingabeKlasse + " mt-3"} value={text}
+               onChange={e => setText(e.target.value)}
+               placeholder="Bildunterschrift (optional)" />
 
-          <div className="space-y-4">
-            {liste.map(k => (
-              <div key={k.id} className="bg-chip border border-line rounded-xl p-4">
-                <div className="flex items-center gap-3 text-sm mb-2">
-                  <span className="font-semibold">{k.mitarbeiter_id ? nameVon(k.mitarbeiter_id) : "ohne Namen"}</span>
-                  <span className="text-muted text-xs">{datumZeitText(k.erstellt_am)}</span>
-                  <button onClick={() => setLoeschen(k)}
-                          className="ml-auto text-muted hover:text-bad text-xs underline px-2 min-h-9">
-                    löschen
-                  </button>
-                </div>
-                {k.text ? <p className="whitespace-pre-wrap mb-3">{k.text}</p> : null}
-                {k.bild_pfad ? (
-                  bilder[k.id] ? (
-                    <a href={bilder[k.id]} target="_blank" rel="noopener noreferrer">
-                      <img src={bilder[k.id]} alt="Skizze"
-                           className="max-h-80 rounded-xl border border-line" />
-                    </a>
-                  ) : (
-                    <p className="text-muted text-sm">Bild wird geladen…</p>
-                  )
-                ) : null}
-              </div>
-            ))}
-          </div>
+        <div className="flex flex-wrap items-center gap-3 mt-3">
+          <Knopf klein onClick={hochladen} disabled={sendet || !datei}>
+            {sendet ? "Lädt hoch…" : "Hinzufügen"}
+          </Knopf>
+          <span className="text-muted text-xs">
+            Am Tablet lässt sich auch direkt die Kamera wählen.
+          </span>
         </div>
-      ) : null}
+      </div>
+
+      {/* Galerie */}
+      {mitBild.length === 0 ? (
+        <p className="text-muted text-center py-8">Noch keine Skizze und kein Foto.</p>
+      ) : (
+        <div className="grid gap-5 sm:grid-cols-2">
+          {mitBild.map(k => (
+            <div key={k.id} className="bg-chip border border-line rounded-xl overflow-hidden">
+              {bilder[k.id] ? (
+                <a href={bilder[k.id]} target="_blank" rel="noopener noreferrer">
+                  <img src={bilder[k.id]} alt={k.text || "Skizze"}
+                       className="w-full max-h-72 object-contain bg-black/30" />
+                </a>
+              ) : (
+                <div className="h-40 flex items-center justify-center text-muted text-sm">lädt…</div>
+              )}
+              <div className="p-3.5">
+                {k.text ? <p className="text-sm mb-2">{k.text}</p> : null}
+                <div className="flex items-center gap-2 text-xs text-muted">
+                  <span>{k.mitarbeiter_id ? nameVon(k.mitarbeiter_id) : "ohne Namen"}</span>
+                  <span>{datumZeitText(k.erstellt_am)}</span>
+                  <button onClick={() => setLoeschen(k)}
+                          className="ml-auto hover:text-bad underline">löschen</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {loeschen ? (
         <LoeschDialog
-          titel="Kommentar löschen"
-          text={"Der Kommentar" + (loeschen.bild_pfad ? " samt Bild" : "") + " wird entfernt."}
+          titel="Bild löschen"
+          text="Das Bild wird endgültig entfernt."
           onJa={() => wirklichLoeschen(loeschen)}
           onSchliessen={() => setLoeschen(null)}
         />
       ) : null}
-    </div>
+    </Dialog>
   );
 }
 
@@ -1371,6 +1434,33 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
   const [buchungen, setBuchungen] = useState([]);
   const [laedt, setLaedt] = useState(true);
   const [dialog, setDialog] = useState(null);
+
+  /* Kommentare liegen hier statt in den Unterbausteinen: Spalte und
+     Skizzen-Dialog zeigen dieselben Daten, also wird auch nur einmal
+     geladen und einmal nachgeladen. */
+  const [kommentare, setKommentare] = useState([]);
+  const [bilder, setBilder] = useState({});
+  const [kLaedt, setKLaedt] = useState(true);
+
+  const ladeKommentare = useCallback(async () => {
+    const { data, error } = await db.from("kommentare")
+      .select("*").eq("auftrag_id", auftragId)
+      .order("erstellt_am", { ascending: false });
+    setKLaedt(false);
+    if (error) { melde("Kommentare: " + error.message, "bad"); return; }
+    setKommentare(data || []);
+
+    /* Der Bucket ist privat - jedes Bild braucht eine befristete Adresse. */
+    const mitBild = (data || []).filter(k => k.bild_pfad);
+    if (mitBild.length === 0) { setBilder({}); return; }
+    const { data: urls } = await db.storage.from(BUCKET)
+      .createSignedUrls(mitBild.map(k => k.bild_pfad), 3600);
+    const karte = {};
+    (urls || []).forEach((u, i) => { if (u && u.signedUrl) karte[mitBild[i].id] = u.signedUrl; });
+    setBilder(karte);
+  }, [auftragId, melde]);
+
+  useEffect(() => { ladeKommentare(); }, [ladeKommentare]);
 
   const laden = useCallback(async () => {
     try {
@@ -1508,6 +1598,7 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
   const zukauf     = positionen.filter(p => !p.ist_fertigung);
   const alleFertig = fertigung.length > 0 && fertigung.every(p => p.erledigt);
 
+  const bildAnzahl    = kommentare.filter(k => k.bild_pfad).length;
   const istArchiviert = auftrag.status === "archiviert";
   const istErledigt   = auftrag.status === "abgeschlossen";
   /* Gebucht und abgehakt wird nur, solange der Auftrag läuft. */
@@ -1529,8 +1620,10 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
         ) : null}
       </div>
 
-      <Kommentare auftragId={auftragId} mitarbeiter={mitarbeiter} ichId={ichId}
-                  melde={melde} nameVon={nameVon} />
+      {/* Zwei Spalten: Auftrag links, laufende Kommentare rechts.
+          Unterhalb von lg rutscht die Spalte unter den Auftrag. */}
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_23rem] items-start">
+      <div className="min-w-0">
 
       {/* Kopf */}
       <div className="bg-panel border border-line rounded-2xl p-6 mb-5">
@@ -1551,6 +1644,10 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
           {auftrag.dokument_pfad
             ? <Knopf art="still" klein onClick={pdfOeffnen}>📄 Original-PDF ansehen</Knopf>
             : <span className="text-muted text-sm self-center">Kein PDF hinterlegt.</span>}
+          <Knopf art="still" klein onClick={() => setDialog({ art: "skizzen" })}>
+            🖼 Skizzen/Fotos
+            {bildAnzahl > 0 ? <span className="opacity-70">({bildAnzahl})</span> : null}
+          </Knopf>
           {istAktiv
             ? <Knopf art="geist" klein onClick={() => setDialog({ art: "position", pos: null })}>
                 + Zubestellung
@@ -1666,6 +1763,13 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
         ) : null}
       </div>
 
+      </div>{/* Ende linke Spalte */}
+
+      <KommentarSpalte kommentare={kommentare} bilder={bilder} laedt={kLaedt}
+                       ichId={ichId} nameVon={nameVon} melde={melde}
+                       auftragId={auftragId} nachladen={ladeKommentare} />
+      </div>{/* Ende Zweispalter */}
+
       {dialog && dialog.art === "zeit" ? (
         <ZeitDialog pos={dialog.pos} mitarbeiter={mitarbeiter} ichId={ichId} melde={melde}
                     onSchliessen={() => setDialog(null)}
@@ -1685,6 +1789,13 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
                          mitarbeiter={mitarbeiter} nameVon={nameVon} melde={melde}
                          onSchliessen={() => setDialog(null)}
                          onGeaendert={nachAenderung} />
+      ) : null}
+
+      {dialog && dialog.art === "skizzen" ? (
+        <SkizzenDialog kommentare={kommentare} bilder={bilder} ichId={ichId}
+                       nameVon={nameVon} melde={melde} auftragId={auftragId}
+                       nachladen={ladeKommentare}
+                       onSchliessen={() => setDialog(null)} />
       ) : null}
 
       {dialog && dialog.art === "kopf" ? (
