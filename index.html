@@ -100,8 +100,29 @@ const SUPABASE_KEY = "sb_publishable_bKycBdawzkSItE7G0YVamQ_ikkJMm0j";
    an die Daten. Siehe docs/entscheidungen.md (E-03). */
 const PIN = "2017";
 
+/* Zweiter PIN für den Admin-Bereich: Aufträge ändern und löschen,
+   Positionen bearbeiten. Muss ein ANDERER sein als der obere - den
+   kennen alle in der Werkstatt.
+   >>> Vor dem Einsatz ändern. <<< */
+const ADMIN_PIN = "9317";
+
 const BEREICH = "schweisserei";
 const BUCKET  = "werkstatt-belege";
+
+/* Aufbau des Boards. `archiviert` taucht hier bewusst nicht auf -
+   diese Aufträge liegen im Archiv-Reiter. */
+const SPALTEN = [
+  { status: "neu",           titel: "Neu",       schrift: "text-accent", rahmen: "bg-accent/10 border-accent/40" },
+  { status: "in_arbeit",     titel: "In Arbeit", schrift: "text-warn",   rahmen: "bg-warn/10 border-warn/40" },
+  { status: "abgeschlossen", titel: "Erledigt",  schrift: "text-ok",     rahmen: "bg-ok/10 border-ok/40" }
+];
+
+const STATUS_TEXT = {
+  neu: "Neu",
+  in_arbeit: "In Arbeit",
+  abgeschlossen: "Erledigt",
+  archiviert: "Archiviert"
+};
 
 const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
   db: { schema: "werkstatt" },
@@ -382,8 +403,23 @@ function KennzeichnungBadge({ art, notiz }) {
 function StatusPunkt({ status }) {
   const farbe = status === "neu" ? "bg-accent"
               : status === "in_arbeit" ? "bg-warn"
-              : "bg-ok";
+              : status === "abgeschlossen" ? "bg-ok"
+              : "bg-muted";
   return <span className={"inline-block w-2.5 h-2.5 rounded-full " + farbe}></span>;
+}
+
+/** Rückfrage vor dem Löschen. Bewusst mit Klartext, was verschwindet. */
+function LoeschDialog({ titel, text, onJa, onSchliessen }) {
+  return (
+    <Dialog titel={titel} onSchliessen={onSchliessen}>
+      <p className="text-muted">{text}</p>
+      <p className="text-muted text-sm mt-2">Das lässt sich nicht rückgängig machen.</p>
+      <div className="flex gap-3 mt-6">
+        <Knopf art="gefahr" onClick={onJa} className="flex-1">Endgültig löschen</Knopf>
+        <Knopf art="geist" onClick={onSchliessen}>Abbrechen</Knopf>
+      </div>
+    </Dialog>
+  );
 }
 
 
@@ -448,6 +484,13 @@ function Anwendung() {
     try { return localStorage.getItem("wsa_ich") || ""; } catch (e) { return ""; }
   });
 
+  /* Admin-Modus: Aufträge ändern und löschen, Positionen bearbeiten.
+     Gilt nur für diese Sitzung - beim nächsten Öffnen ist wieder der
+     normale Werkstattbetrieb aktiv. So kann niemand versehentlich im
+     Adminmodus stehen bleiben. */
+  const [admin, setAdmin] = useState(false);
+  const [adminDialog, setAdminDialog] = useState(false);
+
   const melde = useCallback((text, art = "gut") => {
     setToast({ text, art });
     setTimeout(() => setToast(null), art === "bad" ? 6000 : 3000);
@@ -489,8 +532,8 @@ function Anwendung() {
 
   useEffect(() => { ladeAlles(); }, [ladeAlles]);
 
-  const offene   = useMemo(() => auftraege.filter(a => a.status !== "abgeschlossen"), [auftraege]);
-  const fertige  = useMemo(() => auftraege.filter(a => a.status === "abgeschlossen"), [auftraege]);
+  const aufDemBoard = useMemo(() => auftraege.filter(a => a.status !== "archiviert"), [auftraege]);
+  const archivierte = useMemo(() => auftraege.filter(a => a.status === "archiviert"), [auftraege]);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -500,9 +543,17 @@ function Anwendung() {
         mitarbeiter={mitarbeiter}
         ichId={ichId}
         setzeIch={setzeIch}
-        anzahlOffen={offene.length}
-        anzahlArchiv={fertige.length}
+        anzahlOffen={aufDemBoard.length}
+        anzahlArchiv={archivierte.length}
+        admin={admin}
+        onAdmin={() => admin ? setAdmin(false) : setAdminDialog(true)}
       />
+
+      {admin ? (
+        <div className="bg-bad/15 border-b border-bad/40 text-center py-2 text-sm font-semibold">
+          🔓 Admin-Modus — Aufträge lassen sich jetzt ändern und löschen.
+        </div>
+      ) : null}
 
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 pb-24">
         {laedt ? <Lade text="Aufträge werden geladen…" /> : null}
@@ -512,13 +563,13 @@ function Anwendung() {
         ) : null}
 
         {!laedt && !startFehler && ansicht.name === "board" ? (
-          <Board auftraege={offene}
+          <Board auftraege={aufDemBoard}
                  onOeffnen={id => setAnsicht({ name: "detail", id })}
                  onNeu={() => setAnsicht({ name: "neu" })} />
         ) : null}
 
         {!laedt && !startFehler && ansicht.name === "archiv" ? (
-          <Archiv auftraege={fertige} onOeffnen={id => setAnsicht({ name: "detail", id })} />
+          <Archiv auftraege={archivierte} onOeffnen={id => setAnsicht({ name: "detail", id })} />
         ) : null}
 
         {!laedt && !startFehler && ansicht.name === "neu" ? (
@@ -534,12 +585,20 @@ function Anwendung() {
             auftragId={ansicht.id}
             mitarbeiter={mitarbeiter}
             ichId={ichId}
+            admin={admin}
             melde={melde}
             onZurueck={async () => { await ladeAuftraege(); setAnsicht({ name: "board" }); }}
             onGeaendert={ladeAuftraege}
           />
         ) : null}
       </main>
+
+      {adminDialog ? (
+        <AdminAnmeldung
+          onOk={() => { setAdmin(true); setAdminDialog(false); melde("Admin-Modus aktiv."); }}
+          onSchliessen={() => setAdminDialog(false)}
+        />
+      ) : null}
 
       {toast ? (
         <div className={"fixed left-1/2 -translate-x-1/2 bottom-6 z-[60] px-5 py-3.5 rounded-xl " +
@@ -574,7 +633,43 @@ function StartFehler({ text, onNochmal }) {
 }
 
 
-function Kopfzeile({ ansicht, setAnsicht, mitarbeiter, ichId, setzeIch, anzahlOffen, anzahlArchiv }) {
+function AdminAnmeldung({ onOk, onSchliessen }) {
+  const [wert, setWert] = useState("");
+  const [fehler, setFehler] = useState("");
+
+  function pruefen(e) {
+    e.preventDefault();
+    if (wert.trim() === ADMIN_PIN) onOk();
+    else { setFehler("Falscher Admin-PIN."); setWert(""); }
+  }
+
+  return (
+    <Dialog titel="Admin-Bereich" unterzeile="Aufträge ändern und löschen" onSchliessen={onSchliessen}>
+      <form onSubmit={pruefen}>
+        <p className="text-muted text-sm mb-4">
+          Im normalen Betrieb lassen sich Aufträge anlegen, Zeiten buchen und Positionen
+          abhaken. Zum <b>Ändern und Löschen</b> von Aufträgen und Positionen ist der
+          Admin-PIN nötig.
+        </p>
+        <input type="password" inputMode="numeric" autoFocus value={wert}
+               onChange={e => { setWert(e.target.value); setFehler(""); }}
+               className={eingabeKlasse + " text-center text-2xl tracking-[0.4em]"}
+               placeholder="Admin-PIN" />
+        <div className="text-bad text-sm h-5 mt-2">{fehler}</div>
+        <div className="flex gap-3 mt-3">
+          <Knopf type="submit" className="flex-1">Freischalten</Knopf>
+          <Knopf art="geist" type="button" onClick={onSchliessen}>Abbrechen</Knopf>
+        </div>
+        <p className="text-muted text-xs mt-4">
+          Gilt nur für diese Sitzung — nach dem Schließen des Browsers wieder normaler Betrieb.
+        </p>
+      </form>
+    </Dialog>
+  );
+}
+
+
+function Kopfzeile({ ansicht, setAnsicht, mitarbeiter, ichId, setzeIch, anzahlOffen, anzahlArchiv, admin, onAdmin }) {
   const reiter = [
     { id: "board",  text: "Aufträge", zahl: anzahlOffen },
     { id: "archiv", text: "Archiv",   zahl: anzahlArchiv }
@@ -611,6 +706,14 @@ function Kopfzeile({ ansicht, setAnsicht, mitarbeiter, ichId, setzeIch, anzahlOf
             <option value="">— Name wählen —</option>
             {mitarbeiter.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
           </select>
+
+          <button onClick={onAdmin}
+                  title={admin ? "Admin-Modus beenden" : "Admin-Bereich freischalten"}
+                  className={"px-3 py-2.5 rounded-xl text-sm min-h-11 border transition " +
+                    (admin ? "bg-bad/20 border-bad text-bad font-semibold"
+                           : "bg-panel border-line text-muted hover:text-text")}>
+            {admin ? "🔓 Admin" : "🔒"}
+          </button>
         </div>
       </div>
     </header>
@@ -621,41 +724,45 @@ function Kopfzeile({ ansicht, setAnsicht, mitarbeiter, ichId, setzeIch, anzahlOf
 /* ---------- Board ---------------------------------------------------- */
 
 function Board({ auftraege, onOeffnen, onNeu }) {
-  const gruppen = [
-    { status: "neu",       titel: "Neu" },
-    { status: "in_arbeit", titel: "In Arbeit" }
-  ];
-
   return (
     <div>
       <div className="flex items-center justify-between gap-4 mb-6">
-        <h1 className="text-2xl font-bold">Offene Aufträge</h1>
+        <h1 className="text-2xl font-bold">Aufträge</h1>
         <Knopf onClick={onNeu}>+ Neuer Auftrag</Knopf>
       </div>
 
       {auftraege.length === 0 ? (
         <div className="bg-panel border border-line border-dashed rounded-2xl p-12 text-center">
           <div className="text-4xl mb-3">📋</div>
-          <p className="text-muted">Zurzeit kein offener Auftrag.</p>
+          <p className="text-muted">Zurzeit kein Auftrag auf dem Board.</p>
           <Knopf art="still" className="mt-5" onClick={onNeu}>Ersten Auftrag anlegen</Knopf>
         </div>
-      ) : null}
+      ) : (
+        /* Drei Spalten nebeneinander im Landscape des Tablets, darunter
+           gestapelt - sonst würden die Kacheln zu schmal zum Antippen. */
+        <div className="grid gap-5 lg:grid-cols-3 items-start">
+          {SPALTEN.map(s => {
+            const liste = auftraege.filter(a => a.status === s.status);
+            return (
+              <section key={s.status} className={"rounded-2xl border p-4 " + s.rahmen}>
+                <h2 className="flex items-center gap-2.5 text-sm font-bold tracking-wider uppercase mb-4">
+                  <StatusPunkt status={s.status} />
+                  <span className={s.schrift}>{s.titel}</span>
+                  <span className="text-muted ml-auto">{liste.length}</span>
+                </h2>
 
-      {gruppen.map(g => {
-        const liste = auftraege.filter(a => a.status === g.status);
-        if (liste.length === 0) return null;
-        return (
-          <section key={g.status} className="mb-8">
-            <h2 className="flex items-center gap-2.5 text-sm font-bold text-muted tracking-wider uppercase mb-3">
-              <StatusPunkt status={g.status} /> {g.titel}
-              <span className="opacity-60">({liste.length})</span>
-            </h2>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {liste.map(a => <Kachel key={a.id} a={a} onClick={() => onOeffnen(a.id)} />)}
-            </div>
-          </section>
-        );
-      })}
+                {liste.length === 0 ? (
+                  <p className="text-muted text-sm text-center py-6">—</p>
+                ) : (
+                  <div className="grid gap-3">
+                    {liste.map(a => <Kachel key={a.id} a={a} onClick={() => onOeffnen(a.id)} />)}
+                  </div>
+                )}
+              </section>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -675,7 +782,14 @@ function Kachel({ a, onClick }) {
           <div className="font-bold text-lg truncate">{a.beleg_nr || "ohne Beleg-Nr."}</div>
           <div className="text-muted text-sm truncate">{a.kunde || "—"}</div>
         </div>
-        {a.dokument_pfad ? <span className="text-muted text-lg shrink-0" title="PDF hinterlegt">📄</span> : null}
+        <div className="flex items-center gap-1.5 shrink-0 text-muted">
+          {a.anzahl_kommentare > 0 ? (
+            <span className="text-sm" title={a.anzahl_kommentare + " Kommentare"}>
+              💬{a.anzahl_kommentare}
+            </span>
+          ) : null}
+          {a.dokument_pfad ? <span className="text-lg" title="PDF hinterlegt">📄</span> : null}
+        </div>
       </div>
 
       {a.fahrzeug ? <div className="text-muted text-sm mt-1.5 truncate">🚐 {a.fahrzeug}</div> : null}
@@ -693,8 +807,11 @@ function Kachel({ a, onClick }) {
         </div>
       </div>
 
-      {fertig ? (
-        <div className="mt-3 text-xs text-ok font-semibold">✓ Alle Positionen erledigt — abschließen?</div>
+      {fertig && a.status !== "abgeschlossen" ? (
+        <div className="mt-3 text-xs text-ok font-semibold">✓ Alle Positionen erledigt</div>
+      ) : null}
+      {a.status === "abgeschlossen" ? (
+        <div className="mt-3 text-xs text-muted">Zum Archivieren antippen</div>
       ) : null}
     </button>
   );
@@ -1074,9 +1191,181 @@ function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
 }
 
 
+/* ---------- Kommentare mit Skizzen und Fotos -------------------------- */
+
+/**
+ * Eingeklappter Bereich am Kopf der Detailansicht. Zeigt zugeklappt nur
+ * die Anzahl - im Alltag interessiert die Positionsliste, die Kommentare
+ * sind Nachschlagewerk.
+ */
+function Kommentare({ auftragId, mitarbeiter, ichId, melde, nameVon }) {
+  const [offen, setOffen] = useState(false);
+  const [liste, setListe] = useState([]);
+  const [laedt, setLaedt] = useState(true);
+  const [text, setText] = useState("");
+  const [bild, setBild] = useState(null);
+  const [sendet, setSendet] = useState(false);
+  const [bilder, setBilder] = useState({});   // id -> angezeigte Adresse
+  const [loeschen, setLoeschen] = useState(null);
+  const bildRef = useRef(null);
+
+  const laden = useCallback(async () => {
+    const { data, error } = await db.from("kommentare")
+      .select("*").eq("auftrag_id", auftragId)
+      .order("erstellt_am", { ascending: false });
+    if (error) { melde("Kommentare: " + error.message, "bad"); setLaedt(false); return; }
+    setListe(data || []);
+    setLaedt(false);
+
+    /* Bilder liegen im privaten Bucket - für die Anzeige braucht jedes
+       eine zeitlich begrenzte Adresse. */
+    const mitBild = (data || []).filter(k => k.bild_pfad);
+    if (mitBild.length > 0) {
+      const pfade = mitBild.map(k => k.bild_pfad);
+      const { data: urls } = await db.storage.from(BUCKET).createSignedUrls(pfade, 3600);
+      const karte = {};
+      (urls || []).forEach((u, i) => { if (u && u.signedUrl) karte[mitBild[i].id] = u.signedUrl; });
+      setBilder(karte);
+    }
+  }, [auftragId, melde]);
+
+  useEffect(() => { laden(); }, [laden]);
+
+  async function senden() {
+    if (!text.trim() && !bild) { melde("Bitte etwas schreiben oder ein Bild wählen.", "bad"); return; }
+    setSendet(true);
+    try {
+      let pfad = null;
+      if (bild) {
+        const endung = (bild.name.split(".").pop() || "jpg").toLowerCase();
+        pfad = "kommentare/" + auftragId + "/" + Date.now() + "." + endung;
+        const { error } = await db.storage.from(BUCKET).upload(pfad, bild, {
+          contentType: bild.type || "image/jpeg", upsert: false
+        });
+        if (error) throw error;
+      }
+      const { error: kFehler } = await db.from("kommentare").insert({
+        auftrag_id: auftragId,
+        mitarbeiter_id: ichId || null,
+        text: text.trim() || null,
+        bild_pfad: pfad
+      });
+      if (kFehler) throw kFehler;
+
+      setText(""); setBild(null);
+      if (bildRef.current) bildRef.current.value = "";
+      await laden();
+      melde("Kommentar gespeichert.");
+    } catch (e) {
+      melde("Speichern fehlgeschlagen: " + (e.message || e), "bad");
+    } finally {
+      setSendet(false);
+    }
+  }
+
+  async function wirklichLoeschen(k) {
+    if (k.bild_pfad) await db.storage.from(BUCKET).remove([k.bild_pfad]);
+    const { error } = await db.from("kommentare").delete().eq("id", k.id);
+    setLoeschen(null);
+    if (error) { melde("Löschen fehlgeschlagen: " + error.message, "bad"); return; }
+    await laden();
+    melde("Kommentar gelöscht.");
+  }
+
+  return (
+    <div className="bg-panel border border-line rounded-2xl mb-5 overflow-hidden">
+      <button onClick={() => setOffen(o => !o)}
+              className="w-full flex items-center gap-3 px-6 py-4 hover:bg-panel2 transition text-left">
+        <span className="text-xl">💬</span>
+        <span className="font-semibold">Kommentare & Skizzen</span>
+        <span className="text-muted text-sm">
+          {laedt ? "…" : liste.length === 0 ? "noch keine" : liste.length}
+        </span>
+        <span className="ml-auto text-muted text-sm">{offen ? "▲ zuklappen" : "▼ aufklappen"}</span>
+      </button>
+
+      {offen ? (
+        <div className="px-6 pb-6 border-t border-line pt-5">
+          {/* Neuer Kommentar */}
+          <div className="bg-chip border border-line rounded-xl p-4 mb-5">
+            <textarea rows="2" value={text} onChange={e => setText(e.target.value)}
+                      className={eingabeKlasse} placeholder="Notiz, Hinweis, Absprache…" />
+
+            {bild ? (
+              <div className="flex items-center gap-3 mt-3 bg-ok/10 border border-ok/40 rounded-xl px-4 py-3">
+                <span className="text-lg">🖼</span>
+                <span className="truncate mr-auto text-sm">{bild.name}</span>
+                <button onClick={() => { setBild(null); if (bildRef.current) bildRef.current.value = ""; }}
+                        className="text-muted hover:text-bad text-sm underline px-2 min-h-11">entfernen</button>
+              </div>
+            ) : (
+              <input ref={bildRef} type="file" accept="image/*"
+                     onChange={e => setBild(e.target.files[0] || null)}
+                     className="block w-full text-sm text-muted mt-3 file:mr-4 file:py-2.5 file:px-4
+                                file:rounded-xl file:border-0 file:bg-panel2 file:text-text
+                                file:font-semibold file:cursor-pointer hover:file:bg-line" />
+            )}
+
+            <div className="flex flex-wrap gap-3 mt-3 items-center">
+              <Knopf klein onClick={senden} disabled={sendet}>
+                {sendet ? "Speichert…" : "Hinzufügen"}
+              </Knopf>
+              <span className="text-muted text-xs">
+                {ichId ? "wird unter deinem Namen gespeichert" : "ohne Namen — oben rechts wählen"}
+              </span>
+            </div>
+          </div>
+
+          {/* Vorhandene Kommentare */}
+          {laedt ? <Lade text="Kommentare…" /> : null}
+          {!laedt && liste.length === 0 ? (
+            <p className="text-muted text-sm text-center py-4">Noch kein Kommentar.</p>
+          ) : null}
+
+          <div className="space-y-4">
+            {liste.map(k => (
+              <div key={k.id} className="bg-chip border border-line rounded-xl p-4">
+                <div className="flex items-center gap-3 text-sm mb-2">
+                  <span className="font-semibold">{k.mitarbeiter_id ? nameVon(k.mitarbeiter_id) : "ohne Namen"}</span>
+                  <span className="text-muted text-xs">{datumZeitText(k.erstellt_am)}</span>
+                  <button onClick={() => setLoeschen(k)}
+                          className="ml-auto text-muted hover:text-bad text-xs underline px-2 min-h-9">
+                    löschen
+                  </button>
+                </div>
+                {k.text ? <p className="whitespace-pre-wrap mb-3">{k.text}</p> : null}
+                {k.bild_pfad ? (
+                  bilder[k.id] ? (
+                    <a href={bilder[k.id]} target="_blank" rel="noopener noreferrer">
+                      <img src={bilder[k.id]} alt="Skizze"
+                           className="max-h-80 rounded-xl border border-line" />
+                    </a>
+                  ) : (
+                    <p className="text-muted text-sm">Bild wird geladen…</p>
+                  )
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {loeschen ? (
+        <LoeschDialog
+          titel="Kommentar löschen"
+          text={"Der Kommentar" + (loeschen.bild_pfad ? " samt Bild" : "") + " wird entfernt."}
+          onJa={() => wirklichLoeschen(loeschen)}
+          onSchliessen={() => setLoeschen(null)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+
 /* ---------- Detailansicht -------------------------------------------- */
 
-function Detail({ auftragId, mitarbeiter, ichId, melde, onZurueck, onGeaendert }) {
+function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeaendert }) {
   const [auftrag, setAuftrag] = useState(null);
   const [positionen, setPositionen] = useState([]);
   const [buchungen, setBuchungen] = useState([]);
@@ -1170,7 +1459,16 @@ function Detail({ auftragId, mitarbeiter, ichId, melde, onZurueck, onGeaendert }
       abgeschlossen_von: ichId
     }).eq("id", auftragId);
     if (error) { melde("Fehler: " + error.message, "bad"); return; }
-    melde("Auftrag abgeschlossen und ins Archiv verschoben.");
+    melde("Auftrag als erledigt markiert.");
+    await onZurueck();
+  }
+
+  /* Zweiter, getrennter Schritt: erst erledigt, dann irgendwann aus der
+     Ansicht nehmen. So bleibt Fertiges noch eine Weile sichtbar. */
+  async function archivieren() {
+    const { error } = await db.from("auftraege").update({ status: "archiviert" }).eq("id", auftragId);
+    if (error) { melde("Fehler: " + error.message, "bad"); return; }
+    melde("Auftrag ins Archiv verschoben.");
     await onZurueck();
   }
 
@@ -1180,6 +1478,21 @@ function Detail({ auftragId, mitarbeiter, ichId, melde, onZurueck, onGeaendert }
     }).eq("id", auftragId);
     if (error) { melde("Fehler: " + error.message, "bad"); return; }
     melde("Auftrag wieder geöffnet.");
+    await nachAenderung();
+  }
+
+  async function auftragLoeschen() {
+    const { error } = await db.from("auftraege").delete().eq("id", auftragId);
+    if (error) { melde("Löschen fehlgeschlagen: " + error.message, "bad"); return; }
+    melde("Auftrag gelöscht.");
+    await onZurueck();
+  }
+
+  async function positionLoeschen(pos) {
+    const { error } = await db.from("positionen").delete().eq("id", pos.id);
+    setDialog(null);
+    if (error) { melde("Löschen fehlgeschlagen: " + error.message, "bad"); return; }
+    melde("Position gelöscht.");
     await nachAenderung();
   }
 
@@ -1194,17 +1507,30 @@ function Detail({ auftragId, mitarbeiter, ichId, melde, onZurueck, onGeaendert }
   const fertigung  = positionen.filter(p => p.ist_fertigung);
   const zukauf     = positionen.filter(p => !p.ist_fertigung);
   const alleFertig = fertigung.length > 0 && fertigung.every(p => p.erledigt);
-  const istOffen   = auftrag.status !== "abgeschlossen";
+
+  const istArchiviert = auftrag.status === "archiviert";
+  const istErledigt   = auftrag.status === "abgeschlossen";
+  /* Gebucht und abgehakt wird nur, solange der Auftrag läuft. */
+  const istAktiv      = !istArchiviert && !istErledigt;
 
   return (
     <div>
-      <div className="flex items-center gap-4 mb-5">
+      <div className="flex flex-wrap items-center gap-4 mb-5">
         <Knopf art="geist" klein onClick={onZurueck}>← Zurück</Knopf>
         <StatusPunkt status={auftrag.status} />
         <span className="text-sm text-muted font-semibold uppercase tracking-wider">
-          {auftrag.status === "neu" ? "Neu" : auftrag.status === "in_arbeit" ? "In Arbeit" : "Abgeschlossen"}
+          {STATUS_TEXT[auftrag.status]}
         </span>
+        {admin ? (
+          <Knopf art="gefahr" klein className="ml-auto"
+                 onClick={() => setDialog({ art: "auftragLoeschen" })}>
+            Auftrag löschen
+          </Knopf>
+        ) : null}
       </div>
+
+      <Kommentare auftragId={auftragId} mitarbeiter={mitarbeiter} ichId={ichId}
+                  melde={melde} nameVon={nameVon} />
 
       {/* Kopf */}
       <div className="bg-panel border border-line rounded-2xl p-6 mb-5">
@@ -1225,21 +1551,26 @@ function Detail({ auftragId, mitarbeiter, ichId, melde, onZurueck, onGeaendert }
           {auftrag.dokument_pfad
             ? <Knopf art="still" klein onClick={pdfOeffnen}>📄 Original-PDF ansehen</Knopf>
             : <span className="text-muted text-sm self-center">Kein PDF hinterlegt.</span>}
-          {istOffen
+          {istAktiv
             ? <Knopf art="geist" klein onClick={() => setDialog({ art: "position", pos: null })}>
                 + Zubestellung
+              </Knopf>
+            : null}
+          {admin && istAktiv
+            ? <Knopf art="still" klein onClick={() => setDialog({ art: "kopf" })}>
+                ✎ Kopfdaten ändern
               </Knopf>
             : null}
         </div>
       </div>
 
-      {alleFertig && istOffen ? (
+      {alleFertig && istAktiv ? (
         <div className="bg-ok/10 border border-ok/40 rounded-2xl p-5 mb-5 flex flex-wrap items-center gap-4">
           <div className="mr-auto">
             <div className="font-bold text-ok">Alle Fertigungspositionen sind erledigt.</div>
-            <div className="text-muted text-sm mt-0.5">Auftrag jetzt abschließen und ins Archiv legen?</div>
+            <div className="text-muted text-sm mt-0.5">Auftrag jetzt auf „Erledigt" setzen?</div>
           </div>
-          <Knopf art="gut" klein onClick={abschliessen}>Auftrag abschließen</Knopf>
+          <Knopf art="gut" klein onClick={abschliessen}>Als erledigt markieren</Knopf>
         </div>
       ) : null}
 
@@ -1256,9 +1587,12 @@ function Detail({ auftragId, mitarbeiter, ichId, melde, onZurueck, onGeaendert }
                          minuten={minutenJePosition[p.id] || 0}
                          buchungen={buchungen.filter(b => b.position_id === p.id)}
                          nameVon={nameVon}
-                         istOffen={istOffen}
+                         istAktiv={istAktiv}
+                         admin={admin}
                          onZeit={() => setDialog({ art: "zeit", pos: p })}
+                         onBuchungen={() => setDialog({ art: "buchungen", pos: p })}
                          onBearbeiten={() => setDialog({ art: "position", pos: p })}
+                         onLoeschen={() => setDialog({ art: "posLoeschen", pos: p })}
                          onErledigt={() => erledigtUmschalten(p)} />
         ))}
       </div>
@@ -1279,11 +1613,17 @@ function Detail({ auftragId, mitarbeiter, ichId, melde, onZurueck, onGeaendert }
                 <span className="text-muted">{p.bezeichnung}</span>
                 {p.menge ? <span className="text-muted text-sm">{p.menge} {p.einheit || ""}</span> : null}
                 <KennzeichnungBadge art={p.kennzeichnung} notiz={p.kennzeichnung_notiz} />
-                {istOffen ? (
-                  <button onClick={() => setDialog({ art: "position", pos: p })}
-                          className="ml-auto text-muted hover:text-text text-sm underline">
-                    bearbeiten
-                  </button>
+                {admin && !istArchiviert ? (
+                  <div className="ml-auto flex gap-3">
+                    <button onClick={() => setDialog({ art: "position", pos: p })}
+                            className="text-muted hover:text-text text-sm underline">
+                      bearbeiten
+                    </button>
+                    <button onClick={() => setDialog({ art: "posLoeschen", pos: p })}
+                            className="text-muted hover:text-bad text-sm underline">
+                      löschen
+                    </button>
+                  </div>
                 ) : null}
               </div>
             ))}
@@ -1291,27 +1631,39 @@ function Detail({ auftragId, mitarbeiter, ichId, melde, onZurueck, onGeaendert }
         </div>
       ) : null}
 
-      {/* Abschluss */}
+      {/* Abschluss und Archivierung - bewusst zwei getrennte Schritte */}
       <div className="border-t border-line pt-6 flex flex-wrap gap-3 items-center">
-        {istOffen ? (
+        {istAktiv ? (
           <React.Fragment>
             <Knopf art={alleFertig ? "gut" : "still"} onClick={abschliessen}>
-              Auftrag abschließen
+              Als erledigt markieren
             </Knopf>
             {!alleFertig && fertigung.length > 0 ? (
               <span className="text-muted text-sm">
-                Es sind noch nicht alle Fertigungspositionen erledigt — abschließen geht trotzdem.
+                Es sind noch nicht alle Fertigungspositionen abgehakt — geht trotzdem.
               </span>
             ) : null}
           </React.Fragment>
-        ) : (
+        ) : null}
+
+        {istErledigt ? (
           <React.Fragment>
             <span className="text-muted text-sm mr-auto">
-              Abgeschlossen am {datumText(auftrag.abgeschlossen_am)} von {nameVon(auftrag.abgeschlossen_von)}.
+              Erledigt am {datumText(auftrag.abgeschlossen_am)} von {nameVon(auftrag.abgeschlossen_von)}.
             </span>
             <Knopf art="geist" klein onClick={wiedereroeffnen}>Wieder öffnen</Knopf>
+            <Knopf art="still" klein onClick={archivieren}>📦 Archivieren</Knopf>
           </React.Fragment>
-        )}
+        ) : null}
+
+        {istArchiviert ? (
+          <React.Fragment>
+            <span className="text-muted text-sm mr-auto">
+              Im Archiv. Erledigt am {datumText(auftrag.abgeschlossen_am)} von {nameVon(auftrag.abgeschlossen_von)}.
+            </span>
+            <Knopf art="geist" klein onClick={wiedereroeffnen}>Zurück aufs Board</Knopf>
+          </React.Fragment>
+        ) : null}
       </div>
 
       {dialog && dialog.art === "zeit" ? (
@@ -1326,12 +1678,220 @@ function Detail({ auftragId, mitarbeiter, ichId, melde, onZurueck, onGeaendert }
                         onSchliessen={() => setDialog(null)}
                         onGespeichert={async () => { setDialog(null); await nachAenderung(); }} />
       ) : null}
+
+      {dialog && dialog.art === "buchungen" ? (
+        <BuchungenDialog pos={dialog.pos}
+                         buchungen={buchungen.filter(b => b.position_id === dialog.pos.id)}
+                         mitarbeiter={mitarbeiter} nameVon={nameVon} melde={melde}
+                         onSchliessen={() => setDialog(null)}
+                         onGeaendert={nachAenderung} />
+      ) : null}
+
+      {dialog && dialog.art === "kopf" ? (
+        <KopfDialog auftrag={auftrag} melde={melde}
+                    onSchliessen={() => setDialog(null)}
+                    onGespeichert={async () => { setDialog(null); await nachAenderung(); }} />
+      ) : null}
+
+      {dialog && dialog.art === "posLoeschen" ? (
+        <LoeschDialog
+          titel="Position löschen"
+          text={"„" + dialog.pos.bezeichnung + "\" wird mit allen darauf gebuchten Zeiten entfernt."}
+          onJa={() => positionLoeschen(dialog.pos)}
+          onSchliessen={() => setDialog(null)}
+        />
+      ) : null}
+
+      {dialog && dialog.art === "auftragLoeschen" ? (
+        <LoeschDialog
+          titel="Auftrag löschen"
+          text={"Der Auftrag „" + (auftrag.beleg_nr || "ohne Beleg-Nr.") +
+                "\" wird mit allen Positionen, Zeitbuchungen und Kommentaren entfernt."}
+          onJa={auftragLoeschen}
+          onSchliessen={() => setDialog(null)}
+        />
+      ) : null}
     </div>
   );
 }
 
 
-function PositionZeile({ p, minuten, buchungen, nameVon, istOffen, onZeit, onBearbeiten, onErledigt }) {
+/** Kopfdaten nachträglich korrigieren - nur im Admin-Modus erreichbar. */
+function KopfDialog({ auftrag, melde, onSchliessen, onGespeichert }) {
+  const [f, setF] = useState({
+    beleg_nr: auftrag.beleg_nr || "",
+    kunde:    auftrag.kunde || "",
+    fahrzeug: auftrag.fahrzeug || "",
+    notiz:    auftrag.notiz || ""
+  });
+  const [speichert, setSpeichert] = useState(false);
+
+  async function speichern() {
+    setSpeichert(true);
+    const { error } = await db.from("auftraege").update({
+      beleg_nr: f.beleg_nr.trim() || null,
+      kunde:    f.kunde.trim() || null,
+      fahrzeug: f.fahrzeug.trim() || null,
+      notiz:    f.notiz.trim() || null
+    }).eq("id", auftrag.id);
+    if (error) { melde("Speichern fehlgeschlagen: " + error.message, "bad"); setSpeichert(false); return; }
+    melde("Kopfdaten aktualisiert.");
+    await onGespeichert();
+  }
+
+  return (
+    <Dialog titel="Kopfdaten ändern" onSchliessen={onSchliessen}>
+      <div className="space-y-4">
+        <Feld label="Beleg-Nr. (WSA)">
+          <input className={eingabeKlasse} value={f.beleg_nr} autoFocus
+                 onChange={e => setF({ ...f, beleg_nr: e.target.value })} />
+        </Feld>
+        <Feld label="Kunde">
+          <input className={eingabeKlasse} value={f.kunde}
+                 onChange={e => setF({ ...f, kunde: e.target.value })} />
+        </Feld>
+        <Feld label="Fahrzeug">
+          <input className={eingabeKlasse} value={f.fahrzeug}
+                 onChange={e => setF({ ...f, fahrzeug: e.target.value })} />
+        </Feld>
+        <Feld label="Notiz">
+          <textarea rows="2" className={eingabeKlasse} value={f.notiz}
+                    onChange={e => setF({ ...f, notiz: e.target.value })} />
+        </Feld>
+        <div className="flex gap-3 pt-1">
+          <Knopf onClick={speichern} disabled={speichert} className="flex-1">
+            {speichert ? "Speichert…" : "Speichern"}
+          </Knopf>
+          <Knopf art="geist" onClick={onSchliessen} disabled={speichert}>Abbrechen</Knopf>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+
+/**
+ * Gebuchte Zeiten einer Position ändern oder löschen.
+ * Bewusst für alle zugänglich, nicht nur für Admins: Wer sich beim
+ * Buchen vertippt, soll das sofort selbst richtigstellen können.
+ */
+function BuchungenDialog({ pos, buchungen, mitarbeiter, nameVon, melde, onSchliessen, onGeaendert }) {
+  const [bearbeite, setBearbeite] = useState(null);   // id der Buchung
+  const [stunden, setStunden] = useState("");
+  const [minuten, setMinuten] = useState("");
+  const [notiz, setNotiz] = useState("");
+  const [maId, setMaId] = useState("");
+  const [loeschen, setLoeschen] = useState(null);
+  const [arbeitet, setArbeitet] = useState(false);
+
+  const summe = buchungen.reduce((s, b) => s + b.minuten, 0);
+
+  function starteBearbeiten(b) {
+    setBearbeite(b.id);
+    setStunden(String(Math.floor(b.minuten / 60)));
+    setMinuten(String(b.minuten % 60));
+    setNotiz(b.notiz || "");
+    setMaId(b.mitarbeiter_id);
+  }
+
+  async function speichern(b) {
+    const gesamt = (Number(stunden) || 0) * 60 + (Number(minuten) || 0);
+    if (gesamt <= 0) { melde("Die Zeit muss größer als null sein.", "bad"); return; }
+    setArbeitet(true);
+    const { error } = await db.from("zeitbuchungen").update({
+      minuten: gesamt, notiz: notiz.trim() || null, mitarbeiter_id: maId
+    }).eq("id", b.id);
+    setArbeitet(false);
+    if (error) { melde("Änderung fehlgeschlagen: " + error.message, "bad"); return; }
+    setBearbeite(null);
+    melde("Buchung auf " + minutenText(gesamt) + " geändert.");
+    await onGeaendert();
+  }
+
+  async function wirklichLoeschen(b) {
+    setArbeitet(true);
+    const { error } = await db.from("zeitbuchungen").delete().eq("id", b.id);
+    setArbeitet(false);
+    setLoeschen(null);
+    if (error) { melde("Löschen fehlgeschlagen: " + error.message, "bad"); return; }
+    melde("Buchung gelöscht.");
+    await onGeaendert();
+  }
+
+  return (
+    <Dialog titel="Gebuchte Zeiten" unterzeile={pos.bezeichnung} onSchliessen={onSchliessen} breit>
+      <div className="flex items-baseline gap-3 mb-5">
+        <span className="text-3xl font-bold">{minutenText(summe)}</span>
+        <span className="text-muted text-sm">
+          aus {buchungen.length} {buchungen.length === 1 ? "Buchung" : "Buchungen"}
+        </span>
+      </div>
+
+      {buchungen.length === 0 ? (
+        <p className="text-muted text-center py-6">Auf diese Position wurde noch nichts gebucht.</p>
+      ) : null}
+
+      <div className="space-y-3">
+        {buchungen.map(b => (
+          <div key={b.id} className="bg-chip border border-line rounded-xl p-4">
+            {bearbeite === b.id ? (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="flex items-center gap-2">
+                    <input className={eingabeKlasse + " text-center text-xl"} inputMode="numeric"
+                           value={stunden} onChange={e => setStunden(e.target.value)} />
+                    <span className="text-muted text-sm">Std</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input className={eingabeKlasse + " text-center text-xl"} inputMode="numeric"
+                           value={minuten} onChange={e => setMinuten(e.target.value)} />
+                    <span className="text-muted text-sm">Min</span>
+                  </div>
+                </div>
+                <select value={maId} onChange={e => setMaId(e.target.value)} className={eingabeKlasse}>
+                  {mitarbeiter.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </select>
+                <input className={eingabeKlasse} value={notiz} placeholder="Notiz (optional)"
+                       onChange={e => setNotiz(e.target.value)} />
+                <div className="flex gap-3">
+                  <Knopf klein onClick={() => speichern(b)} disabled={arbeitet}>Übernehmen</Knopf>
+                  <Knopf art="geist" klein onClick={() => setBearbeite(null)}>Abbrechen</Knopf>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <span className="text-xl font-bold w-24">{minutenText(b.minuten)}</span>
+                <span className="text-muted">{nameVon(b.mitarbeiter_id)}</span>
+                <span className="text-muted text-xs">{datumZeitText(b.gebucht_am)}</span>
+                {b.notiz ? <span className="text-muted italic text-sm">„{b.notiz}"</span> : null}
+                <div className="ml-auto flex gap-2">
+                  <Knopf art="geist" klein onClick={() => starteBearbeiten(b)}>Ändern</Knopf>
+                  <Knopf art="geist" klein onClick={() => setLoeschen(b)}>Löschen</Knopf>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <Knopf art="still" className="mt-6 w-full" onClick={onSchliessen}>Schließen</Knopf>
+
+      {loeschen ? (
+        <LoeschDialog
+          titel="Buchung löschen"
+          text={minutenText(loeschen.minuten) + " von " + nameVon(loeschen.mitarbeiter_id) +
+                " werden von dieser Position entfernt."}
+          onJa={() => wirklichLoeschen(loeschen)}
+          onSchliessen={() => setLoeschen(null)}
+        />
+      ) : null}
+    </Dialog>
+  );
+}
+
+
+function PositionZeile({ p, minuten, buchungen, nameVon, istAktiv, admin,
+                         onZeit, onBuchungen, onBearbeiten, onLoeschen, onErledigt }) {
   const [zeigeBuchungen, setZeigeBuchungen] = useState(false);
 
   return (
@@ -1382,15 +1942,29 @@ function PositionZeile({ p, minuten, buchungen, nameVon, istOffen, onZeit, onBea
         </div>
       ) : null}
 
-      {istOffen ? (
-        <div className="flex flex-wrap gap-3 mt-4 ml-10">
-          <Knopf klein onClick={onZeit}>⏱ Zeit buchen</Knopf>
-          <Knopf art={p.erledigt ? "geist" : "gut"} klein onClick={onErledigt}>
-            {p.erledigt ? "↩ Doch nicht erledigt" : "✓ Erledigt"}
-          </Knopf>
-          <Knopf art="geist" klein onClick={onBearbeiten}>Ändern</Knopf>
-        </div>
-      ) : null}
+      <div className="flex flex-wrap gap-3 mt-4 ml-10">
+        {istAktiv ? (
+          <React.Fragment>
+            <Knopf klein onClick={onZeit}>⏱ Zeit buchen</Knopf>
+            <Knopf art={p.erledigt ? "geist" : "gut"} klein onClick={onErledigt}>
+              {p.erledigt ? "↩ Doch nicht erledigt" : "✓ Erledigt"}
+            </Knopf>
+          </React.Fragment>
+        ) : null}
+
+        {/* Zeiten korrigieren darf jeder - Tippfehler beim Buchen soll
+            man selbst geradeziehen können, ohne auf den Admin zu warten. */}
+        {buchungen.length > 0 ? (
+          <Knopf art="geist" klein onClick={onBuchungen}>⏲ Zeiten korrigieren</Knopf>
+        ) : null}
+
+        {admin ? (
+          <React.Fragment>
+            <Knopf art="still" klein onClick={onBearbeiten}>✎ Ändern</Knopf>
+            <Knopf art="geist" klein onClick={onLoeschen}>Löschen</Knopf>
+          </React.Fragment>
+        ) : null}
+      </div>
     </div>
   );
 }
