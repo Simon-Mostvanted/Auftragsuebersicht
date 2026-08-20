@@ -1,0 +1,1618 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0f172a">
+<title>Auftragsübersicht Schweißerei</title>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"></script>
+
+<style type="text/tailwindcss">
+  @theme {
+    /* Hausfarben, identisch zum MV-Artikelmanager und zur Bestell-App. */
+    --color-bg:      #0f172a;
+    --color-panel:   #1e293b;
+    --color-panel2:  #273449;
+    --color-line:    #334155;
+    --color-line2:   #3f4d63;
+    --color-text:    #e2e8f0;
+    --color-muted:   #94a3b8;
+    --color-accent:  #3b82f6;
+    --color-accent2: #2563eb;
+    --color-ok:      #22c55e;
+    --color-warn:    #f59e0b;
+    --color-bad:     #ef4444;
+    --color-chip:    #0b1220;
+  }
+</style>
+
+<style>
+  /* Grundlayout. Bewusst größer als am Desktop: Das Tablet steht in der
+     Werkstatt, wird aus Armlänge gelesen und teils mit Handschuhen bedient. */
+  html { font-size: 17px; }
+  body {
+    margin: 0;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  button, a, input, select, textarea { touch-action: manipulation; }
+  input, select, textarea { font-family: inherit; }
+  /* Zahlenfelder ohne Spinner - die Pfeilchen sind am Tablet unbrauchbar. */
+  input[type=number]::-webkit-outer-spin-button,
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  .spin { animation: sp .7s linear infinite; }
+</style>
+</head>
+<body>
+
+<!-- Auffangnetz: Wenn beim Laden etwas schiefgeht, soll niemand vor einer
+     weißen Seite sitzen, sondern den Grund sehen. -->
+<div id="fehler" style="display:none;padding:24px;font-family:system-ui;color:#fca5a5">
+  <h2 style="margin:0 0 8px">Die Anwendung konnte nicht geladen werden.</h2>
+  <p style="color:#94a3b8;margin:0 0 12px">
+    Meist fehlt die Internetverbindung (React, Tailwind und Supabase werden beim
+    Start nachgeladen). Sonst hilft: Seite neu laden.
+  </p>
+  <pre id="fehlerText" style="white-space:pre-wrap;background:#0b1220;border:1px solid #334155;padding:12px;border-radius:8px;font-size:13px"></pre>
+</div>
+
+<div id="root"></div>
+
+<script>
+  window.addEventListener('error', function (e) {
+    var box = document.getElementById('fehler');
+    var txt = document.getElementById('fehlerText');
+    if (box && txt) {
+      box.style.display = 'block';
+      txt.textContent = (e.message || 'Unbekannter Fehler') +
+        (e.filename ? '\n' + e.filename + ':' + e.lineno : '');
+    }
+  });
+</script>
+
+<script type="text/babel" data-presets="react">
+/* =====================================================================
+   Auftragsübersicht Schweißerei
+   ---------------------------------------------------------------------
+   Eine Datei, keine Installation. Daten liegen in Supabase im Schema
+   `werkstatt` (siehe Schweisserei-Supabase-Setup.sql).
+   ===================================================================== */
+
+/* ---------- Einstellungen ------------------------------------------- */
+
+const SUPABASE_URL = "https://vmxucwenjpwrjpeqcuhc.supabase.co";
+const SUPABASE_KEY = "sb_publishable_bKycBdawzkSItE7G0YVamQ_ikkJMm0j";
+
+/* PIN vor der Anwendung. Gleicher Wert wie im Artikelmanager, damit sich
+   niemand zwei merken muss. Zum Ändern: hier eintragen.
+   Das ist eine Bedienschranke gegen versehentliches Öffnen - kein
+   Datenschutz. Wer die Adresse und den Schlüssel oben kennt, kommt
+   an die Daten. Siehe docs/entscheidungen.md (E-03). */
+const PIN = "2017";
+
+const BEREICH = "schweisserei";
+const BUCKET  = "werkstatt-belege";
+
+const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+  db: { schema: "werkstatt" },
+  auth: { persistSession: false, autoRefreshToken: false }
+});
+
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+
+/* ---------- Kleine Helfer ------------------------------------------- */
+
+/** 135 -> "2:15 h", 45 -> "45 min" */
+function minutenText(min) {
+  min = Number(min) || 0;
+  if (min < 60) return min + " min";
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return h + ":" + String(m).padStart(2, "0") + " h";
+}
+
+function datumText(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+function datumZeitText(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }) + ", " +
+         d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Dateinamen für Supabase Storage entschärfen (keine Umlaute, Leerzeichen). */
+function dateiNameSauber(name) {
+  return name
+    .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
+    .replace(/Ä/g, "Ae").replace(/Ö/g, "Oe").replace(/Ü/g, "Ue")
+    .replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+/**
+ * Zerlegt einen eingefügten Positionsblock zeilenweise.
+ * Erkennt "2 Stk Konsole 40x40" und "Konsole 40x40". Bewusst simpel -
+ * die Zeilen bleiben danach editierbar, Korrektur von Hand ist maßgeblich.
+ */
+function zerlegeBlock(text) {
+  return text
+    .split(/\r?\n/)
+    .map(z => z.trim())
+    .filter(z => z.length > 0)
+    .map(zeile => {
+      const m = zeile.match(/^(\d+(?:[.,]\d+)?)\s*(stk|st|x|m|mm|kg|lfm|m2|m²|set)?\s+(.+)$/i);
+      if (m && m[3] && m[3].trim().length > 1) {
+        return {
+          menge: m[1].replace(",", "."),
+          einheit: m[2] ? m[2] : "Stk",
+          bezeichnung: m[3].trim(),
+          ist_fertigung: true
+        };
+      }
+      return { menge: "1", einheit: "Stk", bezeichnung: zeile, ist_fertigung: true };
+    });
+}
+
+
+/* =====================================================================
+   PDF auslesen (Claude)
+   ---------------------------------------------------------------------
+   Gleiches Vorgehen wie in MV-Artikelnummer/app/wareneingang.html:
+   Datei direkt an die Anthropic-API, Antwort gegen ein festes Schema.
+   Das Ergebnis ist ein VORSCHLAG - er landet in der editierbaren
+   Positionsliste, korrigiert wird von Hand.
+   ===================================================================== */
+
+const CLAUDE_MODEL = "claude-sonnet-5";
+const KEY_SPEICHER = "anthropic_api_key";
+
+const BELEG_SCHEMA = {
+  type: "object",
+  properties: {
+    beleg_nr: { type: "string", description: "Belegnummer bzw. Lieferschein-Nr. des Belegs, sonst ''" },
+    kunde:    { type: "string", description: "Name des Kunden bzw. Empfängers, sonst ''" },
+    fahrzeug: { type: "string", description: "Fahrzeug, Fahrzeugtyp oder Kennzeichen, falls auf dem Beleg genannt, sonst ''" },
+    positionen: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          bezeichnung: { type: "string", description: "Bezeichnung der Position, so wie sie auf dem Beleg steht" },
+          menge:       { type: "string", description: "Menge als Zahl ohne Einheit, sonst '1'" },
+          einheit:     { type: "string", description: "Einheit, z. B. Stk, m, kg. Wenn keine genannt: 'Stk'" },
+          art: {
+            type: "string",
+            enum: ["fertigung", "zukauf"],
+            description: "'zukauf' nur bei eindeutig zugekauftem Fertigteil/Material, das nur beigestellt wird. Im Zweifel immer 'fertigung'."
+          }
+        },
+        required: ["bezeichnung"],
+        additionalProperties: false
+      }
+    }
+  },
+  required: ["positionen"],
+  additionalProperties: false
+};
+
+const BELEG_PROMPT =
+  "Dies ist ein WSA-Beleg der Schweißerei (technisch ein Lieferschein aus Lexware, evtl. mehrere Seiten). " +
+  "Extrahiere die Belegnummer, den Kunden, falls genannt das Fahrzeug, und ALLE echten Arbeits- bzw. Warenpositionen.\n\n" +
+  "Pro Position: 'bezeichnung' wortgetreu vom Beleg, 'menge' als reine Zahl, 'einheit' getrennt davon.\n\n" +
+  "Zu 'art': Die Schweißerei fertigt selbst. Setze 'zukauf' nur, wenn eine Position eindeutig ein zugekauftes " +
+  "Fertigteil oder Material ist, an dem nicht gearbeitet wird. Bei jeder Unsicherheit 'fertigung' setzen - " +
+  "eine falsch als Zukauf markierte Position würde die Stundenerfassung unterschlagen.\n\n" +
+  "KEINE Positionen aufnehmen, die keine Leistung oder Ware sind - also weder Rabatt, Skonto, Nachlass, " +
+  "Gutschrift, noch Versand, Fracht, Anlieferung, Transport, Anfahrt, Porto, Verpackung, Palette, Pfand, " +
+  "Mindermengenzuschlag oder Bearbeitungsgebühr. Ebenso keine Zwischensumme, Gesamtsumme, Netto, Brutto, " +
+  "MwSt./Steuer und keine Kopf- oder Fußzeilen.";
+
+function warte(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/** Datei in einen Inhaltsblock für die API verwandeln. PDFs gehen direkt. */
+function dateiZuInhalt(f) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve({
+      type: "document",
+      source: { type: "base64", media_type: "application/pdf", data: String(r.result).split(",")[1] }
+    });
+    r.onerror = reject;
+    r.readAsDataURL(f);
+  });
+}
+
+async function leseBelegAus(apiKey, datei, beiWiederholung) {
+  const inhalt = [await dateiZuInhalt(datei), { type: "text", text: BELEG_PROMPT }];
+  const body = {
+    model: CLAUDE_MODEL,
+    max_tokens: 8000,
+    system: "Du bist ein präziser Assistent für Beleg-Extraktion. Antworte ausschließlich mit dem geforderten JSON.",
+    messages: [{ role: "user", content: inhalt }],
+    output_config: { format: { type: "json_schema", schema: BELEG_SCHEMA } }
+  };
+
+  const MAX = 4, pausen = [1200, 2500, 4500];
+  let letzterFehler = null;
+
+  for (let versuch = 1; versuch <= MAX; versuch++) {
+    let antwort = null;
+    try {
+      antwort = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true"
+        },
+        body: JSON.stringify(body)
+      });
+    } catch (e) {
+      letzterFehler = new Error("Netzwerkfehler beim Aufruf. Besteht eine Internetverbindung?");
+      if (versuch < MAX) { beiWiederholung && beiWiederholung(versuch + 1, MAX); await warte(pausen[versuch - 1]); continue; }
+      throw letzterFehler;
+    }
+
+    const json = await antwort.json().catch(() => null);
+
+    if (antwort.ok) {
+      const teile = (json && Array.isArray(json.content)) ? json.content : [];
+      let text = teile.filter(b => b.type === "text").map(b => b.text || "").join("").trim();
+      if (!text) throw new Error("Keine Antwort erhalten.");
+      if (text.includes("```")) {
+        const m = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+        if (m && m[1]) text = m[1].trim();
+      }
+      return JSON.parse(text);
+    }
+
+    const meldung = (json && json.error && json.error.message) || ("HTTP " + antwort.status);
+    const voruebergehend = antwort.status === 429 || antwort.status === 529 ||
+                           antwort.status >= 500 || /overloaded/i.test(meldung);
+    if (voruebergehend && versuch < MAX) {
+      beiWiederholung && beiWiederholung(versuch + 1, MAX);
+      await warte(pausen[versuch - 1]);
+      continue;
+    }
+    if (antwort.status === 401) throw new Error("Ungültiger API-Key (beginnt mit sk-ant-…).");
+    if (antwort.status === 400 && /credit|balance|billing/i.test(meldung))
+      throw new Error("Kein Guthaben auf dem Anthropic-Konto.");
+    if (antwort.status === 429) throw new Error("Zu viele Anfragen — bitte kurz warten.");
+    if (antwort.status === 529 || /overloaded/i.test(meldung))
+      throw new Error("Claude ist gerade überlastet — bitte gleich noch einmal.");
+    throw new Error(meldung);
+  }
+  throw letzterFehler || new Error("Auslesen fehlgeschlagen.");
+}
+
+
+/* ---------- Bausteine ----------------------------------------------- */
+
+function Knopf({ art = "primaer", klein = false, className = "", ...rest }) {
+  const basis = "inline-flex items-center justify-center gap-2 rounded-xl font-semibold " +
+                "transition select-none disabled:opacity-40 disabled:cursor-not-allowed";
+  const groesse = klein ? "px-4 py-2.5 text-sm min-h-11" : "px-5 py-3.5 text-base min-h-14";
+  const arten = {
+    primaer:  "bg-accent hover:bg-accent2 text-white",
+    still:    "bg-panel2 border border-line2 text-text hover:border-accent",
+    geist:    "bg-transparent border border-line2 text-muted hover:text-text hover:border-accent",
+    gut:      "bg-ok hover:brightness-110 text-[#052e16]",
+    warnung:  "bg-warn hover:brightness-110 text-[#431407]",
+    gefahr:   "bg-bad hover:brightness-110 text-white"
+  };
+  return <button className={basis + " " + groesse + " " + arten[art] + " " + className} {...rest} />;
+}
+
+function Feld({ label, hinweis, children }) {
+  return (
+    <label className="block">
+      <span className="block text-xs text-muted mb-1.5 font-medium">{label}</span>
+      {children}
+      {hinweis ? <span className="block text-xs text-muted mt-1">{hinweis}</span> : null}
+    </label>
+  );
+}
+
+const eingabeKlasse =
+  "w-full bg-chip border border-line rounded-xl px-4 py-3 text-base text-text " +
+  "outline-none focus:border-accent placeholder:text-muted/60";
+
+function Lade({ text = "Lädt…" }) {
+  return (
+    <div className="flex items-center gap-3 text-muted py-10 justify-center">
+      <span className="spin inline-block w-5 h-5 border-2 border-line2 border-t-accent rounded-full"></span>
+      {text}
+    </div>
+  );
+}
+
+function Dialog({ titel, unterzeile, onSchliessen, children, breit = false }) {
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-6"
+         onClick={onSchliessen}>
+      <div className={"bg-panel border border-line rounded-t-2xl sm:rounded-2xl w-full " +
+                      (breit ? "sm:max-w-3xl" : "sm:max-w-xl") +
+                      " max-h-[92vh] overflow-y-auto shadow-2xl"}
+           onClick={e => e.stopPropagation()}>
+        <div className="sticky top-0 bg-panel border-b border-line px-6 py-4 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-bold">{titel}</h2>
+            {unterzeile ? <p className="text-sm text-muted mt-0.5">{unterzeile}</p> : null}
+          </div>
+          <button onClick={onSchliessen}
+                  className="text-muted hover:text-text text-2xl leading-none px-2 -mr-2"
+                  aria-label="Schließen">×</button>
+        </div>
+        <div className="px-6 py-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/** Farbiges Etikett an einer Position: Zubestellung / Geändert. */
+function KennzeichnungBadge({ art, notiz }) {
+  if (art === "original") return null;
+  const stil = art === "neu"
+    ? "bg-warn/15 text-warn border-warn/40"
+    : "bg-bad/15 text-bad border-bad/40";
+  const text = art === "neu" ? "ZUBESTELLUNG" : "GEÄNDERT";
+  return (
+    <span className={"inline-flex items-center gap-1.5 border rounded-lg px-2.5 py-1 text-xs font-bold tracking-wide " + stil}>
+      {text}
+      {notiz ? <span className="font-normal opacity-90">· {notiz}</span> : null}
+    </span>
+  );
+}
+
+function StatusPunkt({ status }) {
+  const farbe = status === "neu" ? "bg-accent"
+              : status === "in_arbeit" ? "bg-warn"
+              : "bg-ok";
+  return <span className={"inline-block w-2.5 h-2.5 rounded-full " + farbe}></span>;
+}
+
+
+/* =====================================================================
+   Hauptanwendung
+   ===================================================================== */
+
+function App() {
+  const [entsperrt, setEntsperrt] = useState(() => {
+    try { return sessionStorage.getItem("wsa_ok") === "1"; } catch (e) { return false; }
+  });
+
+  if (!entsperrt) return <PinSperre onOk={() => setEntsperrt(true)} />;
+  return <Anwendung />;
+}
+
+function PinSperre({ onOk }) {
+  const [wert, setWert] = useState("");
+  const [fehler, setFehler] = useState("");
+
+  function pruefen(e) {
+    e.preventDefault();
+    if (wert.trim() === PIN) {
+      try { sessionStorage.setItem("wsa_ok", "1"); } catch (err) {}
+      onOk();
+    } else {
+      setFehler("Falscher PIN.");
+      setWert("");
+    }
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-6">
+      <form onSubmit={pruefen}
+            className="bg-panel border border-line rounded-2xl p-8 w-full max-w-sm text-center">
+        <div className="text-4xl mb-3">🔧</div>
+        <h1 className="text-xl font-bold">Auftragsübersicht</h1>
+        <p className="text-muted text-sm mt-1 mb-6">Schweißerei · Bitte PIN eingeben.</p>
+        <input type="password" inputMode="numeric" autoFocus value={wert}
+               onChange={e => { setWert(e.target.value); setFehler(""); }}
+               className={eingabeKlasse + " text-center text-2xl tracking-[0.4em]"}
+               placeholder="PIN" />
+        <div className="text-bad text-sm h-5 mt-2">{fehler}</div>
+        <Knopf type="submit" className="w-full mt-2">Öffnen</Knopf>
+      </form>
+    </div>
+  );
+}
+
+
+function Anwendung() {
+  const [ansicht, setAnsicht] = useState({ name: "board" });
+  const [mitarbeiter, setMitarbeiter] = useState([]);
+  const [auftraege, setAuftraege] = useState([]);
+  const [laedt, setLaedt] = useState(true);
+  const [startFehler, setStartFehler] = useState("");
+  const [toast, setToast] = useState(null);
+
+  /* Wer steht gerade am Tablet. Kein Login - nur eine Vorauswahl, damit
+     die Dropdowns in den Dialogen schon gefüllt sind. Überall änderbar. */
+  const [ichId, setIchId] = useState(() => {
+    try { return localStorage.getItem("wsa_ich") || ""; } catch (e) { return ""; }
+  });
+
+  const melde = useCallback((text, art = "gut") => {
+    setToast({ text, art });
+    setTimeout(() => setToast(null), art === "bad" ? 6000 : 3000);
+  }, []);
+
+  const setzeIch = useCallback((id) => {
+    setIchId(id);
+    try { localStorage.setItem("wsa_ich", id); } catch (e) {}
+  }, []);
+
+  const ladeAuftraege = useCallback(async () => {
+    const { data, error } = await db
+      .from("v_auftrag_uebersicht")
+      .select("*")
+      .eq("bereich", BEREICH)
+      .order("erstellt_am", { ascending: false });
+    if (error) throw error;
+    setAuftraege(data || []);
+  }, []);
+
+  const ladeAlles = useCallback(async () => {
+    setLaedt(true);
+    setStartFehler("");
+    try {
+      const { data: ma, error: maFehler } = await db
+        .from("mitarbeiter")
+        .select("*")
+        .eq("aktiv", true)
+        .order("name");
+      if (maFehler) throw maFehler;
+      setMitarbeiter(ma || []);
+      await ladeAuftraege();
+    } catch (e) {
+      setStartFehler(e.message || String(e));
+    } finally {
+      setLaedt(false);
+    }
+  }, [ladeAuftraege]);
+
+  useEffect(() => { ladeAlles(); }, [ladeAlles]);
+
+  const offene   = useMemo(() => auftraege.filter(a => a.status !== "abgeschlossen"), [auftraege]);
+  const fertige  = useMemo(() => auftraege.filter(a => a.status === "abgeschlossen"), [auftraege]);
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <Kopfzeile
+        ansicht={ansicht}
+        setAnsicht={setAnsicht}
+        mitarbeiter={mitarbeiter}
+        ichId={ichId}
+        setzeIch={setzeIch}
+        anzahlOffen={offene.length}
+        anzahlArchiv={fertige.length}
+      />
+
+      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 pb-24">
+        {laedt ? <Lade text="Aufträge werden geladen…" /> : null}
+
+        {!laedt && startFehler ? (
+          <StartFehler text={startFehler} onNochmal={ladeAlles} />
+        ) : null}
+
+        {!laedt && !startFehler && ansicht.name === "board" ? (
+          <Board auftraege={offene}
+                 onOeffnen={id => setAnsicht({ name: "detail", id })}
+                 onNeu={() => setAnsicht({ name: "neu" })} />
+        ) : null}
+
+        {!laedt && !startFehler && ansicht.name === "archiv" ? (
+          <Archiv auftraege={fertige} onOeffnen={id => setAnsicht({ name: "detail", id })} />
+        ) : null}
+
+        {!laedt && !startFehler && ansicht.name === "neu" ? (
+          <NeuerAuftrag
+            onFertig={async () => { await ladeAuftraege(); setAnsicht({ name: "board" }); melde("Auftrag angelegt."); }}
+            onAbbruch={() => setAnsicht({ name: "board" })}
+            melde={melde}
+          />
+        ) : null}
+
+        {!laedt && !startFehler && ansicht.name === "detail" ? (
+          <Detail
+            auftragId={ansicht.id}
+            mitarbeiter={mitarbeiter}
+            ichId={ichId}
+            melde={melde}
+            onZurueck={async () => { await ladeAuftraege(); setAnsicht({ name: "board" }); }}
+            onGeaendert={ladeAuftraege}
+          />
+        ) : null}
+      </main>
+
+      {toast ? (
+        <div className={"fixed left-1/2 -translate-x-1/2 bottom-6 z-[60] px-5 py-3.5 rounded-xl " +
+                        "border shadow-2xl text-base max-w-[92vw] " +
+                        (toast.art === "bad"
+                          ? "bg-[#2a1215] border-bad text-[#fecaca]"
+                          : "bg-[#0b1220] border-line2 text-text")}>
+          {toast.text}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+
+function StartFehler({ text, onNochmal }) {
+  return (
+    <div className="bg-bad/10 border border-bad/40 rounded-2xl p-6">
+      <h2 className="font-bold text-lg text-[#fecaca]">Keine Verbindung zur Datenbank</h2>
+      <p className="text-muted text-sm mt-2">
+        Die Anwendung erreicht das Schema <code className="bg-chip px-1.5 py-0.5 rounded">werkstatt</code> nicht.
+      </p>
+      <pre className="bg-chip border border-line rounded-xl p-3 mt-3 text-xs whitespace-pre-wrap text-muted">{text}</pre>
+      <ul className="text-sm text-muted mt-4 space-y-1.5 list-disc pl-5">
+        <li>Wurde <b>Schweisserei-Supabase-Setup.sql</b> im Supabase SQL-Editor ausgeführt?</li>
+        <li>Steht <b>werkstatt</b> unter <i>Project Settings → API → Exposed schemas</i>?</li>
+        <li>Besteht eine Internetverbindung?</li>
+      </ul>
+      <Knopf art="still" className="mt-5" onClick={onNochmal}>Nochmal versuchen</Knopf>
+    </div>
+  );
+}
+
+
+function Kopfzeile({ ansicht, setAnsicht, mitarbeiter, ichId, setzeIch, anzahlOffen, anzahlArchiv }) {
+  const reiter = [
+    { id: "board",  text: "Aufträge", zahl: anzahlOffen },
+    { id: "archiv", text: "Archiv",   zahl: anzahlArchiv }
+  ];
+  return (
+    <header className="sticky top-0 z-30 bg-chip border-b border-line">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center gap-x-5 gap-y-3">
+        <div className="flex items-center gap-3 mr-auto">
+          <span className="bg-accent text-white rounded-lg px-2.5 py-1 text-xs font-bold tracking-wider">WSA</span>
+          <div className="leading-tight">
+            <div className="font-bold">Auftragsübersicht</div>
+            <div className="text-muted text-xs font-medium">Schweißerei</div>
+          </div>
+        </div>
+
+        <nav className="flex gap-2">
+          {reiter.map(r => (
+            <button key={r.id}
+                    onClick={() => setAnsicht({ name: r.id })}
+                    className={"px-4 py-2.5 rounded-xl text-sm font-semibold min-h-11 transition " +
+                      (ansicht.name === r.id || (r.id === "board" && ansicht.name === "detail")
+                        ? "bg-accent text-white"
+                        : "bg-panel border border-line text-muted hover:text-text")}>
+              {r.text}
+              <span className="ml-2 opacity-70">{r.zahl}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted hidden sm:inline">Ich bin</span>
+          <select value={ichId} onChange={e => setzeIch(e.target.value)}
+                  className="bg-panel border border-line rounded-xl px-3 py-2.5 text-sm min-h-11 outline-none focus:border-accent">
+            <option value="">— Name wählen —</option>
+            {mitarbeiter.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+          </select>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+
+/* ---------- Board ---------------------------------------------------- */
+
+function Board({ auftraege, onOeffnen, onNeu }) {
+  const gruppen = [
+    { status: "neu",       titel: "Neu" },
+    { status: "in_arbeit", titel: "In Arbeit" }
+  ];
+
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-4 mb-6">
+        <h1 className="text-2xl font-bold">Offene Aufträge</h1>
+        <Knopf onClick={onNeu}>+ Neuer Auftrag</Knopf>
+      </div>
+
+      {auftraege.length === 0 ? (
+        <div className="bg-panel border border-line border-dashed rounded-2xl p-12 text-center">
+          <div className="text-4xl mb-3">📋</div>
+          <p className="text-muted">Zurzeit kein offener Auftrag.</p>
+          <Knopf art="still" className="mt-5" onClick={onNeu}>Ersten Auftrag anlegen</Knopf>
+        </div>
+      ) : null}
+
+      {gruppen.map(g => {
+        const liste = auftraege.filter(a => a.status === g.status);
+        if (liste.length === 0) return null;
+        return (
+          <section key={g.status} className="mb-8">
+            <h2 className="flex items-center gap-2.5 text-sm font-bold text-muted tracking-wider uppercase mb-3">
+              <StatusPunkt status={g.status} /> {g.titel}
+              <span className="opacity-60">({liste.length})</span>
+            </h2>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {liste.map(a => <Kachel key={a.id} a={a} onClick={() => onOeffnen(a.id)} />)}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function Kachel({ a, onClick }) {
+  const gesamt   = a.anzahl_fertigung || 0;
+  const erledigt = a.anzahl_fertigung_erledigt || 0;
+  const anteil   = gesamt > 0 ? Math.round((erledigt / gesamt) * 100) : 0;
+  const fertig   = gesamt > 0 && erledigt === gesamt;
+
+  return (
+    <button onClick={onClick}
+            className="text-left bg-panel border border-line rounded-2xl p-5 w-full
+                       hover:border-accent hover:bg-panel2 transition active:scale-[0.99]">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="font-bold text-lg truncate">{a.beleg_nr || "ohne Beleg-Nr."}</div>
+          <div className="text-muted text-sm truncate">{a.kunde || "—"}</div>
+        </div>
+        {a.dokument_pfad ? <span className="text-muted text-lg shrink-0" title="PDF hinterlegt">📄</span> : null}
+      </div>
+
+      {a.fahrzeug ? <div className="text-muted text-sm mt-1.5 truncate">🚐 {a.fahrzeug}</div> : null}
+
+      <div className="mt-4">
+        <div className="flex items-center justify-between text-sm mb-1.5">
+          <span className={fertig ? "text-ok font-semibold" : "text-muted"}>
+            {erledigt}/{gesamt} Positionen
+          </span>
+          <span className="text-muted">{minutenText(a.gebuchte_minuten)}</span>
+        </div>
+        <div className="h-2 bg-chip rounded-full overflow-hidden">
+          <div className={"h-full rounded-full transition-all " + (fertig ? "bg-ok" : "bg-accent")}
+               style={{ width: anteil + "%" }}></div>
+        </div>
+      </div>
+
+      {fertig ? (
+        <div className="mt-3 text-xs text-ok font-semibold">✓ Alle Positionen erledigt — abschließen?</div>
+      ) : null}
+    </button>
+  );
+}
+
+
+/* ---------- Archiv --------------------------------------------------- */
+
+function Archiv({ auftraege, onOeffnen }) {
+  const [suche, setSuche] = useState("");
+
+  const gefiltert = useMemo(() => {
+    const s = suche.trim().toLowerCase();
+    if (!s) return auftraege;
+    return auftraege.filter(a =>
+      (a.beleg_nr || "").toLowerCase().includes(s) ||
+      (a.kunde || "").toLowerCase().includes(s) ||
+      (a.fahrzeug || "").toLowerCase().includes(s)
+    );
+  }, [auftraege, suche]);
+
+  return (
+    <div>
+      <h1 className="text-2xl font-bold mb-5">Archiv</h1>
+      <input value={suche} onChange={e => setSuche(e.target.value)}
+             className={eingabeKlasse + " mb-5"}
+             placeholder="Suchen nach Beleg-Nr., Kunde oder Fahrzeug…" />
+
+      {gefiltert.length === 0 ? (
+        <div className="bg-panel border border-line border-dashed rounded-2xl p-12 text-center text-muted">
+          {suche ? "Nichts gefunden." : "Noch kein Auftrag abgeschlossen."}
+        </div>
+      ) : (
+        <div className="grid gap-3">
+          {gefiltert.map(a => (
+            <button key={a.id} onClick={() => onOeffnen(a.id)}
+                    className="text-left bg-panel border border-line rounded-xl px-5 py-4 w-full
+                               hover:border-accent transition flex flex-wrap items-center gap-x-5 gap-y-1.5">
+              <span className="font-bold">{a.beleg_nr || "ohne Beleg-Nr."}</span>
+              <span className="text-muted">{a.kunde || "—"}</span>
+              <span className="text-muted text-sm ml-auto">{minutenText(a.gebuchte_minuten)}</span>
+              <span className="text-muted text-sm">abgeschlossen {datumText(a.abgeschlossen_am)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+/* ---------- Neuer Auftrag -------------------------------------------- */
+
+function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
+  const [kopf, setKopf] = useState({ beleg_nr: "", kunde: "", fahrzeug: "", notiz: "" });
+  const [zeilen, setZeilen] = useState([leereZeile()]);
+  const [datei, setDatei] = useState(null);
+  const [einfuegen, setEinfuegen] = useState("");
+  const [zeigeEinfuegen, setZeigeEinfuegen] = useState(false);
+  const [speichert, setSpeichert] = useState(false);
+  const dateiRef = useRef(null);
+
+  const [apiKey, setApiKey] = useState(() => {
+    try { return localStorage.getItem(KEY_SPEICHER) || ""; } catch (e) { return ""; }
+  });
+  const [zeigeKey, setZeigeKey] = useState(false);
+  const [liest, setLiest] = useState("");   // Statustext während des Auslesens
+
+  function merkeKey(wert) {
+    setApiKey(wert);
+    try { localStorage.setItem(KEY_SPEICHER, wert.trim()); } catch (e) {}
+  }
+
+  /** PDF an Claude schicken und die erkannten Zeilen übernehmen. */
+  async function pdfAuslesen() {
+    if (!datei) return;
+    if (!apiKey.trim()) { setZeigeKey(true); melde("Bitte einmalig den Claude-API-Key eintragen.", "bad"); return; }
+
+    setLiest("Beleg wird gelesen…");
+    try {
+      const erg = await leseBelegAus(apiKey.trim(), datei, (v, max) =>
+        setLiest("Claude ist ausgelastet — Versuch " + v + " von " + max + "…"));
+
+      /* Kopfdaten nur füllen, wenn noch nichts eingetragen ist -
+         was von Hand kam, hat Vorrang vor der Erkennung. */
+      setKopf(alt => ({
+        ...alt,
+        beleg_nr: alt.beleg_nr.trim() || (erg.beleg_nr || ""),
+        kunde:    alt.kunde.trim()    || (erg.kunde || ""),
+        fahrzeug: alt.fahrzeug.trim() || (erg.fahrzeug || "")
+      }));
+
+      const neue = (erg.positionen || []).map(p => ({
+        bezeichnung:   (p.bezeichnung || "").trim(),
+        menge:         String(p.menge || "1").replace(",", "."),
+        einheit:       (p.einheit || "Stk").trim() || "Stk",
+        ist_fertigung: p.art !== "zukauf"
+      })).filter(p => p.bezeichnung);
+
+      if (neue.length === 0) {
+        melde("Es wurden keine Positionen erkannt. Bitte von Hand erfassen.", "bad");
+      } else {
+        setZeilen(alt => alt.filter(z => z.bezeichnung.trim()).concat(neue));
+        const zk = neue.filter(p => !p.ist_fertigung).length;
+        melde(neue.length + " Positionen erkannt" + (zk ? " (davon " + zk + " als Zukaufteil)" : "") + " — bitte prüfen.");
+      }
+    } catch (e) {
+      melde("Auslesen fehlgeschlagen: " + (e.message || e), "bad");
+    } finally {
+      setLiest("");
+    }
+  }
+
+  function leereZeile() {
+    return { bezeichnung: "", menge: "1", einheit: "Stk", ist_fertigung: true };
+  }
+
+  function aendere(i, feld, wert) {
+    setZeilen(alt => alt.map((z, k) => k === i ? { ...z, [feld]: wert } : z));
+  }
+
+  function uebernehmeBlock() {
+    const neue = zerlegeBlock(einfuegen);
+    if (neue.length === 0) { melde("Keine Zeilen erkannt.", "bad"); return; }
+    setZeilen(alt => {
+      const bestand = alt.filter(z => z.bezeichnung.trim());
+      return bestand.concat(neue);
+    });
+    setEinfuegen("");
+    setZeigeEinfuegen(false);
+    melde(neue.length + " Zeilen übernommen — bitte prüfen.");
+  }
+
+  async function speichern() {
+    const gueltige = zeilen.filter(z => z.bezeichnung.trim());
+    if (!kopf.beleg_nr.trim() && !kopf.kunde.trim()) {
+      melde("Bitte mindestens Beleg-Nr. oder Kunde angeben.", "bad");
+      return;
+    }
+    if (gueltige.length === 0) {
+      melde("Bitte mindestens eine Position erfassen.", "bad");
+      return;
+    }
+
+    setSpeichert(true);
+    try {
+      const { data: auftrag, error: aFehler } = await db
+        .from("auftraege")
+        .insert({
+          beleg_nr: kopf.beleg_nr.trim() || null,
+          kunde:    kopf.kunde.trim() || null,
+          fahrzeug: kopf.fahrzeug.trim() || null,
+          notiz:    kopf.notiz.trim() || null,
+          bereich:  BEREICH,
+          status:   "neu"
+        })
+        .select()
+        .single();
+      if (aFehler) throw aFehler;
+
+      const { error: pFehler } = await db.from("positionen").insert(
+        gueltige.map((z, i) => ({
+          auftrag_id:    auftrag.id,
+          pos_nr:        i + 1,
+          bezeichnung:   z.bezeichnung.trim(),
+          menge:         z.menge ? Number(String(z.menge).replace(",", ".")) : null,
+          einheit:       z.einheit.trim() || null,
+          ist_fertigung: z.ist_fertigung,
+          kennzeichnung: "original"
+        }))
+      );
+      if (pFehler) throw pFehler;
+
+      /* PDF zum Schluss: Wenn der Upload scheitert, steht der Auftrag
+         trotzdem schon im Board und das PDF lässt sich nachreichen. */
+      if (datei) {
+        const pfad = auftrag.id + "/" + Date.now() + "_" + dateiNameSauber(datei.name);
+        const { error: sFehler } = await db.storage.from(BUCKET).upload(pfad, datei, {
+          contentType: "application/pdf", upsert: false
+        });
+        if (sFehler) {
+          melde("Auftrag gespeichert, aber das PDF konnte nicht hochgeladen werden: " + sFehler.message, "bad");
+        } else {
+          await db.from("auftraege").update({ dokument_pfad: pfad }).eq("id", auftrag.id);
+        }
+      }
+
+      await onFertig();
+    } catch (e) {
+      melde("Speichern fehlgeschlagen: " + (e.message || e), "bad");
+      setSpeichert(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-4 mb-6">
+        <Knopf art="geist" klein onClick={onAbbruch}>← Zurück</Knopf>
+        <h1 className="text-2xl font-bold">Neuer Auftrag</h1>
+      </div>
+
+      <div className="bg-panel border border-line rounded-2xl p-6 mb-5">
+        <h2 className="font-bold mb-4">Kopfdaten</h2>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Feld label="Beleg-Nr. (WSA)">
+            <input className={eingabeKlasse} value={kopf.beleg_nr} placeholder="z. B. WSA-1042"
+                   onChange={e => setKopf({ ...kopf, beleg_nr: e.target.value })} />
+          </Feld>
+          <Feld label="Kunde">
+            <input className={eingabeKlasse} value={kopf.kunde}
+                   onChange={e => setKopf({ ...kopf, kunde: e.target.value })} />
+          </Feld>
+          <Feld label="Fahrzeug (optional)" hinweis="z. B. Sprinter L2H2 oder Kennzeichen">
+            <input className={eingabeKlasse} value={kopf.fahrzeug}
+                   onChange={e => setKopf({ ...kopf, fahrzeug: e.target.value })} />
+          </Feld>
+          <Feld label="Notiz (optional)">
+            <input className={eingabeKlasse} value={kopf.notiz}
+                   onChange={e => setKopf({ ...kopf, notiz: e.target.value })} />
+          </Feld>
+        </div>
+
+        <div className="mt-5">
+          <Feld label="Original-PDF"
+                hinweis="Der WSA-Beleg aus Lexware. Wird am Auftrag hinterlegt — und kann die Positionen automatisch füllen.">
+            {datei ? (
+              <div className="bg-ok/10 border border-ok/40 rounded-xl px-4 py-3.5">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="text-xl">📄</span>
+                  <div className="min-w-0 mr-auto">
+                    <div className="font-semibold truncate">{datei.name}</div>
+                    <div className="text-muted text-xs">
+                      {(datei.size / 1024 / 1024).toFixed(1)} MB · wird beim Anlegen hochgeladen
+                    </div>
+                  </div>
+                  <button onClick={() => { setDatei(null); if (dateiRef.current) dateiRef.current.value = ""; }}
+                          className="text-muted hover:text-bad text-sm underline px-2 min-h-11">
+                    entfernen
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-ok/25">
+                  <Knopf klein onClick={pdfAuslesen} disabled={!!liest}>
+                    {liest ? "⏳ " + liest : "✨ Positionen aus PDF auslesen"}
+                  </Knopf>
+                  {!liest ? (
+                    <span className="text-muted text-xs">
+                      Claude liest den Beleg und füllt die Positionen unten. Ergebnis bitte prüfen.
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <input ref={dateiRef} type="file" accept="application/pdf"
+                     onChange={e => setDatei(e.target.files[0] || null)}
+                     className="block w-full text-sm text-muted file:mr-4 file:py-3 file:px-5
+                                file:rounded-xl file:border-0 file:bg-panel2 file:text-text
+                                file:font-semibold file:cursor-pointer hover:file:bg-line" />
+            )}
+          </Feld>
+
+          {/* API-Key fürs Auslesen. Einmal eintragen, bleibt im Browser
+              dieses Geräts gespeichert - derselbe Ablauf wie im
+              Wareneingang des Artikelmanagers. */}
+          <div className="mt-3">
+            {apiKey && !zeigeKey ? (
+              <button onClick={() => setZeigeKey(true)}
+                      className="text-muted text-xs underline hover:text-text">
+                Claude-API-Key hinterlegt · ändern
+              </button>
+            ) : (
+              <div className="bg-chip border border-line rounded-xl p-4">
+                <Feld label="Claude-API-Key"
+                      hinweis="Nur nötig fürs Auslesen. Wird im Browser dieses Geräts gespeichert.">
+                  <input type="password" value={apiKey} placeholder="sk-ant-…"
+                         autoComplete="off" onChange={e => merkeKey(e.target.value)}
+                         className={eingabeKlasse} />
+                </Feld>
+                {apiKey ? (
+                  <Knopf art="geist" klein className="mt-3" onClick={() => setZeigeKey(false)}>Fertig</Knopf>
+                ) : null}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-panel border border-line rounded-2xl p-6 mb-5">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <h2 className="font-bold">Positionen</h2>
+          <Knopf art="geist" klein onClick={() => setZeigeEinfuegen(v => !v)}>
+            📋 Aus Beleg einfügen
+          </Knopf>
+        </div>
+
+        {zeigeEinfuegen ? (
+          <div className="bg-chip border border-line rounded-xl p-4 mb-5">
+            <p className="text-sm text-muted mb-2">
+              Positionsblock aus dem Beleg hier einfügen — eine Position je Zeile.
+              Die Zeilen werden danach ganz normal editierbar.
+            </p>
+            <textarea rows="6" value={einfuegen} onChange={e => setEinfuegen(e.target.value)}
+                      className={eingabeKlasse + " font-mono text-sm"}
+                      placeholder={"2 Stk Konsole 40x40 verzinkt\n1 Stk Trittstufe links\n4 Stk Halter M8"} />
+            <div className="flex gap-3 mt-3">
+              <Knopf klein onClick={uebernehmeBlock} disabled={!einfuegen.trim()}>Übernehmen</Knopf>
+              <Knopf art="geist" klein onClick={() => setZeigeEinfuegen(false)}>Abbrechen</Knopf>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="space-y-3">
+          {zeilen.map((z, i) => (
+            <div key={i} className="bg-chip border border-line rounded-xl p-4">
+              <div className="flex items-start gap-3">
+                <span className="text-muted font-mono text-sm pt-3.5 w-6 shrink-0">{i + 1}</span>
+                <div className="flex-1 grid gap-3 sm:grid-cols-[1fr_5rem_6rem]">
+                  <input className={eingabeKlasse} placeholder="Bezeichnung" value={z.bezeichnung}
+                         onChange={e => aendere(i, "bezeichnung", e.target.value)} />
+                  <input className={eingabeKlasse} placeholder="Menge" inputMode="decimal" value={z.menge}
+                         onChange={e => aendere(i, "menge", e.target.value)} />
+                  <input className={eingabeKlasse} placeholder="Einheit" value={z.einheit}
+                         onChange={e => aendere(i, "einheit", e.target.value)} />
+                </div>
+                <button onClick={() => setZeilen(alt => alt.filter((_, k) => k !== i))}
+                        className="text-muted hover:text-bad text-xl px-2 pt-2.5 shrink-0"
+                        aria-label="Zeile entfernen">×</button>
+              </div>
+
+              <div className="flex gap-2 mt-3 ml-9">
+                <button onClick={() => aendere(i, "ist_fertigung", true)}
+                        className={"px-4 py-2 rounded-lg text-sm font-semibold min-h-10 border transition " +
+                          (z.ist_fertigung
+                            ? "bg-accent/15 border-accent text-accent"
+                            : "bg-transparent border-line2 text-muted")}>
+                  🔧 Fertigung
+                </button>
+                <button onClick={() => aendere(i, "ist_fertigung", false)}
+                        className={"px-4 py-2 rounded-lg text-sm font-semibold min-h-10 border transition " +
+                          (!z.ist_fertigung
+                            ? "bg-muted/15 border-muted text-muted"
+                            : "bg-transparent border-line2 text-muted")}>
+                  📦 Zukaufteil
+                </button>
+                {!z.ist_fertigung ? (
+                  <span className="text-xs text-muted self-center ml-1">keine Stundenerfassung</span>
+                ) : null}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <Knopf art="still" className="mt-4"
+               onClick={() => setZeilen(alt => alt.concat([leereZeile()]))}>
+          + Zeile
+        </Knopf>
+      </div>
+
+      {/* Sagt vorab, was noch fehlt - statt den Fehler erst beim Drücken zu melden. */}
+      {(() => {
+        const fehlt = [];
+        if (!kopf.beleg_nr.trim() && !kopf.kunde.trim()) fehlt.push("Beleg-Nr. oder Kunde");
+        if (zeilen.filter(z => z.bezeichnung.trim()).length === 0) fehlt.push("mindestens eine Position");
+        return fehlt.length > 0
+          ? <p className="text-warn text-sm mb-3">Zum Anlegen fehlt noch: {fehlt.join(" und ")}.</p>
+          : null;
+      })()}
+
+      <div className="flex flex-wrap gap-3">
+        <Knopf onClick={speichern} disabled={speichert}>
+          {speichert ? (datei ? "Speichert und lädt PDF hoch…" : "Speichert…") : "Auftrag anlegen"}
+        </Knopf>
+        <Knopf art="geist" onClick={onAbbruch} disabled={speichert}>Abbrechen</Knopf>
+      </div>
+    </div>
+  );
+}
+
+
+/* ---------- Detailansicht -------------------------------------------- */
+
+function Detail({ auftragId, mitarbeiter, ichId, melde, onZurueck, onGeaendert }) {
+  const [auftrag, setAuftrag] = useState(null);
+  const [positionen, setPositionen] = useState([]);
+  const [buchungen, setBuchungen] = useState([]);
+  const [laedt, setLaedt] = useState(true);
+  const [dialog, setDialog] = useState(null);
+
+  const laden = useCallback(async () => {
+    try {
+      const [a, p] = await Promise.all([
+        db.from("v_auftrag_uebersicht").select("*").eq("id", auftragId).single(),
+        db.from("positionen").select("*").eq("auftrag_id", auftragId)
+          .order("pos_nr", { ascending: true, nullsFirst: false })
+      ]);
+      if (a.error) throw a.error;
+      if (p.error) throw p.error;
+      setAuftrag(a.data);
+      setPositionen(p.data || []);
+
+      const ids = (p.data || []).map(x => x.id);
+      if (ids.length > 0) {
+        const { data: z, error: zFehler } = await db
+          .from("zeitbuchungen").select("*").in("position_id", ids)
+          .order("gebucht_am", { ascending: false });
+        if (zFehler) throw zFehler;
+        setBuchungen(z || []);
+      } else {
+        setBuchungen([]);
+      }
+    } catch (e) {
+      melde("Laden fehlgeschlagen: " + (e.message || e), "bad");
+    } finally {
+      setLaedt(false);
+    }
+  }, [auftragId, melde]);
+
+  useEffect(() => { laden(); }, [laden]);
+
+  const nameVon = useCallback(id => {
+    const m = mitarbeiter.find(x => x.id === id);
+    return m ? m.name : "—";
+  }, [mitarbeiter]);
+
+  const minutenJePosition = useMemo(() => {
+    const summe = {};
+    buchungen.forEach(b => { summe[b.position_id] = (summe[b.position_id] || 0) + b.minuten; });
+    return summe;
+  }, [buchungen]);
+
+  /* Sobald das erste Mal gebucht oder abgehakt wird, wandert der Auftrag
+     von `neu` nach `in_arbeit`. Die App führt, sie blockiert nicht. */
+  const inArbeitSetzen = useCallback(async () => {
+    if (auftrag && auftrag.status === "neu") {
+      await db.from("auftraege").update({ status: "in_arbeit" }).eq("id", auftragId);
+    }
+  }, [auftrag, auftragId]);
+
+  async function nachAenderung() {
+    await laden();
+    await onGeaendert();
+  }
+
+  async function pdfOeffnen() {
+    if (!auftrag || !auftrag.dokument_pfad) return;
+    const { data, error } = await db.storage.from(BUCKET)
+      .createSignedUrl(auftrag.dokument_pfad, 3600);
+    if (error) { melde("PDF konnte nicht geöffnet werden: " + error.message, "bad"); return; }
+    window.open(data.signedUrl, "_blank");
+  }
+
+  async function erledigtUmschalten(pos) {
+    if (!pos.erledigt && !ichId) {
+      melde("Bitte oben rechts den eigenen Namen wählen.", "bad");
+      return;
+    }
+    const neu = !pos.erledigt;
+    const { error } = await db.from("positionen").update({
+      erledigt: neu,
+      erledigt_am: neu ? new Date().toISOString() : null,
+      erledigt_von: neu ? ichId : null
+    }).eq("id", pos.id);
+    if (error) { melde("Fehler: " + error.message, "bad"); return; }
+    if (neu) await inArbeitSetzen();
+    await nachAenderung();
+  }
+
+  async function abschliessen() {
+    if (!ichId) { melde("Bitte oben rechts den eigenen Namen wählen.", "bad"); return; }
+    const { error } = await db.from("auftraege").update({
+      status: "abgeschlossen",
+      abgeschlossen_am: new Date().toISOString(),
+      abgeschlossen_von: ichId
+    }).eq("id", auftragId);
+    if (error) { melde("Fehler: " + error.message, "bad"); return; }
+    melde("Auftrag abgeschlossen und ins Archiv verschoben.");
+    await onZurueck();
+  }
+
+  async function wiedereroeffnen() {
+    const { error } = await db.from("auftraege").update({
+      status: "in_arbeit", abgeschlossen_am: null, abgeschlossen_von: null
+    }).eq("id", auftragId);
+    if (error) { melde("Fehler: " + error.message, "bad"); return; }
+    melde("Auftrag wieder geöffnet.");
+    await nachAenderung();
+  }
+
+  if (laedt) return <Lade text="Auftrag wird geladen…" />;
+  if (!auftrag) return (
+    <div>
+      <Knopf art="geist" klein onClick={onZurueck}>← Zurück</Knopf>
+      <p className="text-muted mt-6">Auftrag nicht gefunden.</p>
+    </div>
+  );
+
+  const fertigung  = positionen.filter(p => p.ist_fertigung);
+  const zukauf     = positionen.filter(p => !p.ist_fertigung);
+  const alleFertig = fertigung.length > 0 && fertigung.every(p => p.erledigt);
+  const istOffen   = auftrag.status !== "abgeschlossen";
+
+  return (
+    <div>
+      <div className="flex items-center gap-4 mb-5">
+        <Knopf art="geist" klein onClick={onZurueck}>← Zurück</Knopf>
+        <StatusPunkt status={auftrag.status} />
+        <span className="text-sm text-muted font-semibold uppercase tracking-wider">
+          {auftrag.status === "neu" ? "Neu" : auftrag.status === "in_arbeit" ? "In Arbeit" : "Abgeschlossen"}
+        </span>
+      </div>
+
+      {/* Kopf */}
+      <div className="bg-panel border border-line rounded-2xl p-6 mb-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold">{auftrag.beleg_nr || "ohne Beleg-Nr."}</h1>
+            <p className="text-muted mt-1">{auftrag.kunde || "—"}</p>
+            {auftrag.fahrzeug ? <p className="text-muted text-sm mt-0.5">🚐 {auftrag.fahrzeug}</p> : null}
+            {auftrag.notiz ? <p className="text-sm mt-3 bg-chip border border-line rounded-xl px-4 py-3">{auftrag.notiz}</p> : null}
+          </div>
+          <div className="text-right">
+            <div className="text-3xl font-bold">{minutenText(auftrag.gebuchte_minuten)}</div>
+            <div className="text-muted text-sm">gebucht gesamt</div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-3 mt-5">
+          {auftrag.dokument_pfad
+            ? <Knopf art="still" klein onClick={pdfOeffnen}>📄 Original-PDF ansehen</Knopf>
+            : <span className="text-muted text-sm self-center">Kein PDF hinterlegt.</span>}
+          {istOffen
+            ? <Knopf art="geist" klein onClick={() => setDialog({ art: "position", pos: null })}>
+                + Zubestellung
+              </Knopf>
+            : null}
+        </div>
+      </div>
+
+      {alleFertig && istOffen ? (
+        <div className="bg-ok/10 border border-ok/40 rounded-2xl p-5 mb-5 flex flex-wrap items-center gap-4">
+          <div className="mr-auto">
+            <div className="font-bold text-ok">Alle Fertigungspositionen sind erledigt.</div>
+            <div className="text-muted text-sm mt-0.5">Auftrag jetzt abschließen und ins Archiv legen?</div>
+          </div>
+          <Knopf art="gut" klein onClick={abschliessen}>Auftrag abschließen</Knopf>
+        </div>
+      ) : null}
+
+      {/* Fertigungspositionen */}
+      <h2 className="text-sm font-bold text-muted tracking-wider uppercase mb-3">
+        Fertigung ({fertigung.filter(p => p.erledigt).length}/{fertigung.length} erledigt)
+      </h2>
+      <div className="space-y-3 mb-8">
+        {fertigung.length === 0 ? (
+          <p className="text-muted text-sm">Keine Fertigungspositionen.</p>
+        ) : null}
+        {fertigung.map(p => (
+          <PositionZeile key={p.id} p={p}
+                         minuten={minutenJePosition[p.id] || 0}
+                         buchungen={buchungen.filter(b => b.position_id === p.id)}
+                         nameVon={nameVon}
+                         istOffen={istOffen}
+                         onZeit={() => setDialog({ art: "zeit", pos: p })}
+                         onBearbeiten={() => setDialog({ art: "position", pos: p })}
+                         onErledigt={() => erledigtUmschalten(p)} />
+        ))}
+      </div>
+
+      {/* Zukaufteile */}
+      {zukauf.length > 0 ? (
+        <div className="mb-8">
+          <h2 className="text-sm font-bold text-muted tracking-wider uppercase mb-3">
+            Zukaufteile ({zukauf.length}) · nur Information
+          </h2>
+          <div className="space-y-2">
+            {zukauf.map(p => (
+              <div key={p.id}
+                   className="bg-panel/50 border border-line/60 border-dashed rounded-xl px-5 py-4
+                              flex flex-wrap items-center gap-x-4 gap-y-2">
+                <span className="text-muted text-lg">📦</span>
+                <span className="text-muted font-mono text-sm">{p.pos_nr}</span>
+                <span className="text-muted">{p.bezeichnung}</span>
+                {p.menge ? <span className="text-muted text-sm">{p.menge} {p.einheit || ""}</span> : null}
+                <KennzeichnungBadge art={p.kennzeichnung} notiz={p.kennzeichnung_notiz} />
+                {istOffen ? (
+                  <button onClick={() => setDialog({ art: "position", pos: p })}
+                          className="ml-auto text-muted hover:text-text text-sm underline">
+                    bearbeiten
+                  </button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Abschluss */}
+      <div className="border-t border-line pt-6 flex flex-wrap gap-3 items-center">
+        {istOffen ? (
+          <React.Fragment>
+            <Knopf art={alleFertig ? "gut" : "still"} onClick={abschliessen}>
+              Auftrag abschließen
+            </Knopf>
+            {!alleFertig && fertigung.length > 0 ? (
+              <span className="text-muted text-sm">
+                Es sind noch nicht alle Fertigungspositionen erledigt — abschließen geht trotzdem.
+              </span>
+            ) : null}
+          </React.Fragment>
+        ) : (
+          <React.Fragment>
+            <span className="text-muted text-sm mr-auto">
+              Abgeschlossen am {datumText(auftrag.abgeschlossen_am)} von {nameVon(auftrag.abgeschlossen_von)}.
+            </span>
+            <Knopf art="geist" klein onClick={wiedereroeffnen}>Wieder öffnen</Knopf>
+          </React.Fragment>
+        )}
+      </div>
+
+      {dialog && dialog.art === "zeit" ? (
+        <ZeitDialog pos={dialog.pos} mitarbeiter={mitarbeiter} ichId={ichId} melde={melde}
+                    onSchliessen={() => setDialog(null)}
+                    onGebucht={async () => { setDialog(null); await inArbeitSetzen(); await nachAenderung(); }} />
+      ) : null}
+
+      {dialog && dialog.art === "position" ? (
+        <PositionDialog pos={dialog.pos} auftragId={auftragId}
+                        naechsteNr={positionen.length + 1} melde={melde}
+                        onSchliessen={() => setDialog(null)}
+                        onGespeichert={async () => { setDialog(null); await nachAenderung(); }} />
+      ) : null}
+    </div>
+  );
+}
+
+
+function PositionZeile({ p, minuten, buchungen, nameVon, istOffen, onZeit, onBearbeiten, onErledigt }) {
+  const [zeigeBuchungen, setZeigeBuchungen] = useState(false);
+
+  return (
+    <div className={"border rounded-2xl p-5 transition " +
+                    (p.erledigt ? "bg-panel/60 border-ok/30" : "bg-panel border-line")}>
+      <div className="flex flex-wrap items-start gap-4">
+        <span className="text-muted font-mono text-sm pt-1 w-6 shrink-0">{p.pos_nr}</span>
+
+        <div className="flex-1 min-w-[12rem]">
+          <div className={"font-semibold text-lg " + (p.erledigt ? "text-muted line-through" : "")}>
+            {p.bezeichnung}
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-1.5">
+            {p.menge ? <span className="text-muted text-sm">{p.menge} {p.einheit || ""}</span> : null}
+            <KennzeichnungBadge art={p.kennzeichnung} notiz={p.kennzeichnung_notiz} />
+          </div>
+          {p.beschreibung ? <p className="text-muted text-sm mt-2">{p.beschreibung}</p> : null}
+          {p.erledigt ? (
+            <p className="text-ok text-sm mt-2">
+              ✓ erledigt am {datumZeitText(p.erledigt_am)} von {nameVon(p.erledigt_von)}
+            </p>
+          ) : null}
+        </div>
+
+        <div className="text-right shrink-0">
+          <button onClick={() => setZeigeBuchungen(v => !v)}
+                  disabled={buchungen.length === 0}
+                  className="text-xl font-bold disabled:cursor-default">
+            {minutenText(minuten)}
+          </button>
+          <div className="text-muted text-xs">
+            {buchungen.length === 0 ? "keine Buchung"
+              : buchungen.length + (buchungen.length === 1 ? " Buchung" : " Buchungen")}
+          </div>
+        </div>
+      </div>
+
+      {zeigeBuchungen && buchungen.length > 0 ? (
+        <div className="mt-4 ml-10 bg-chip border border-line rounded-xl divide-y divide-line">
+          {buchungen.map(b => (
+            <div key={b.id} className="px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+              <span className="font-semibold w-20">{minutenText(b.minuten)}</span>
+              <span className="text-muted">{nameVon(b.mitarbeiter_id)}</span>
+              <span className="text-muted text-xs">{datumZeitText(b.gebucht_am)}</span>
+              {b.notiz ? <span className="text-muted italic w-full sm:w-auto">„{b.notiz}"</span> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {istOffen ? (
+        <div className="flex flex-wrap gap-3 mt-4 ml-10">
+          <Knopf klein onClick={onZeit}>⏱ Zeit buchen</Knopf>
+          <Knopf art={p.erledigt ? "geist" : "gut"} klein onClick={onErledigt}>
+            {p.erledigt ? "↩ Doch nicht erledigt" : "✓ Erledigt"}
+          </Knopf>
+          <Knopf art="geist" klein onClick={onBearbeiten}>Ändern</Knopf>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+
+function ZeitDialog({ pos, mitarbeiter, ichId, melde, onSchliessen, onGebucht }) {
+  const [maId, setMaId] = useState(ichId || "");
+  const [stunden, setStunden] = useState("");
+  const [minuten, setMinuten] = useState("");
+  const [notiz, setNotiz] = useState("");
+  const [speichert, setSpeichert] = useState(false);
+
+  const gesamt = (Number(stunden) || 0) * 60 + (Number(minuten) || 0);
+
+  function schnell(m) {
+    const neu = gesamt + m;
+    setStunden(String(Math.floor(neu / 60)));
+    setMinuten(String(neu % 60));
+  }
+
+  async function buchen() {
+    if (!maId) { melde("Bitte einen Namen wählen.", "bad"); return; }
+    if (gesamt <= 0) { melde("Bitte eine Zeit größer als null eingeben.", "bad"); return; }
+    setSpeichert(true);
+    const { error } = await db.from("zeitbuchungen").insert({
+      position_id: pos.id, mitarbeiter_id: maId, minuten: gesamt, notiz: notiz.trim() || null
+    });
+    if (error) { melde("Buchen fehlgeschlagen: " + error.message, "bad"); setSpeichert(false); return; }
+    melde(minutenText(gesamt) + " gebucht.");
+    await onGebucht();
+  }
+
+  return (
+    <Dialog titel="Zeit buchen" unterzeile={pos.bezeichnung} onSchliessen={onSchliessen}>
+      <div className="space-y-5">
+        <Feld label="Wer hat gearbeitet?">
+          <select value={maId} onChange={e => setMaId(e.target.value)} className={eingabeKlasse}>
+            <option value="">— Name wählen —</option>
+            {mitarbeiter.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+          </select>
+        </Feld>
+
+        <div>
+          <span className="block text-xs text-muted mb-1.5 font-medium">Dauer</span>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex items-center gap-2">
+              <input className={eingabeKlasse + " text-center text-xl"} inputMode="numeric"
+                     placeholder="0" value={stunden} onChange={e => setStunden(e.target.value)} />
+              <span className="text-muted text-sm">Std</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input className={eingabeKlasse + " text-center text-xl"} inputMode="numeric"
+                     placeholder="0" value={minuten} onChange={e => setMinuten(e.target.value)} />
+              <span className="text-muted text-sm">Min</span>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2 mt-3">
+            {[15, 30, 60, 120].map(m => (
+              <button key={m} onClick={() => schnell(m)}
+                      className="px-4 py-2.5 min-h-11 rounded-xl bg-panel2 border border-line2
+                                 text-sm font-semibold hover:border-accent">
+                +{m < 60 ? m + " min" : (m / 60) + " h"}
+              </button>
+            ))}
+            <button onClick={() => { setStunden(""); setMinuten(""); }}
+                    className="px-4 py-2.5 min-h-11 rounded-xl border border-line2 text-muted text-sm hover:text-text">
+              zurücksetzen
+            </button>
+          </div>
+          <div className="text-center text-2xl font-bold mt-4">{minutenText(gesamt)}</div>
+        </div>
+
+        <Feld label="Notiz (optional)">
+          <input className={eingabeKlasse} value={notiz} onChange={e => setNotiz(e.target.value)}
+                 placeholder="z. B. Nacharbeit Schweißnaht" />
+        </Feld>
+
+        <div className="flex gap-3 pt-1">
+          <Knopf onClick={buchen} disabled={speichert} className="flex-1">
+            {speichert ? "Bucht…" : "Buchen"}
+          </Knopf>
+          <Knopf art="geist" onClick={onSchliessen} disabled={speichert}>Abbrechen</Knopf>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+
+/**
+ * Position anlegen (Zubestellung) oder bearbeiten.
+ * Beim Bearbeiten wird die Kennzeichnung auf `geaendert` gesetzt, sofern
+ * es nicht ohnehin schon eine Zubestellung ist - so bleibt sichtbar,
+ * dass sich gegenüber dem Original etwas verschoben hat.
+ */
+function PositionDialog({ pos, auftragId, naechsteNr, melde, onSchliessen, onGespeichert }) {
+  const neu = !pos;
+  const [f, setF] = useState({
+    bezeichnung:   pos ? pos.bezeichnung : "",
+    beschreibung:  pos && pos.beschreibung ? pos.beschreibung : "",
+    menge:         pos && pos.menge != null ? String(pos.menge) : "1",
+    einheit:       pos && pos.einheit ? pos.einheit : "Stk",
+    ist_fertigung: pos ? pos.ist_fertigung : true,
+    notiz:         pos && pos.kennzeichnung_notiz ? pos.kennzeichnung_notiz : ""
+  });
+  const [alsGeaendert, setAlsGeaendert] = useState(!neu && pos.kennzeichnung === "original");
+  const [speichert, setSpeichert] = useState(false);
+
+  async function speichern() {
+    if (!f.bezeichnung.trim()) { melde("Bitte eine Bezeichnung angeben.", "bad"); return; }
+    setSpeichert(true);
+
+    const werte = {
+      bezeichnung:   f.bezeichnung.trim(),
+      beschreibung:  f.beschreibung.trim() || null,
+      menge:         f.menge ? Number(String(f.menge).replace(",", ".")) : null,
+      einheit:       f.einheit.trim() || null,
+      ist_fertigung: f.ist_fertigung,
+      kennzeichnung_notiz: f.notiz.trim() || null
+    };
+
+    let error;
+    if (neu) {
+      werte.auftrag_id = auftragId;
+      werte.pos_nr = naechsteNr;
+      werte.kennzeichnung = "neu";
+      ({ error } = await db.from("positionen").insert(werte));
+    } else {
+      if (pos.kennzeichnung === "original" && alsGeaendert) werte.kennzeichnung = "geaendert";
+      ({ error } = await db.from("positionen").update(werte).eq("id", pos.id));
+    }
+
+    if (error) { melde("Speichern fehlgeschlagen: " + error.message, "bad"); setSpeichert(false); return; }
+    melde(neu ? "Zubestellung ergänzt." : "Position aktualisiert.");
+    await onGespeichert();
+  }
+
+  return (
+    <Dialog titel={neu ? "Zubestellung ergänzen" : "Position ändern"}
+            unterzeile={neu ? "Wird auffällig als Zubestellung markiert." : pos.bezeichnung}
+            onSchliessen={onSchliessen}>
+      <div className="space-y-5">
+        <Feld label="Bezeichnung">
+          <input className={eingabeKlasse} value={f.bezeichnung} autoFocus
+                 onChange={e => setF({ ...f, bezeichnung: e.target.value })} />
+        </Feld>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Feld label="Menge">
+            <input className={eingabeKlasse} inputMode="decimal" value={f.menge}
+                   onChange={e => setF({ ...f, menge: e.target.value })} />
+          </Feld>
+          <Feld label="Einheit">
+            <input className={eingabeKlasse} value={f.einheit}
+                   onChange={e => setF({ ...f, einheit: e.target.value })} />
+          </Feld>
+        </div>
+
+        <Feld label="Beschreibung (optional)">
+          <textarea rows="2" className={eingabeKlasse} value={f.beschreibung}
+                    onChange={e => setF({ ...f, beschreibung: e.target.value })} />
+        </Feld>
+
+        <div>
+          <span className="block text-xs text-muted mb-1.5 font-medium">Art</span>
+          <div className="flex gap-2">
+            <button onClick={() => setF({ ...f, ist_fertigung: true })}
+                    className={"px-5 py-3 min-h-12 rounded-xl text-sm font-semibold border transition " +
+                      (f.ist_fertigung ? "bg-accent/15 border-accent text-accent"
+                                       : "border-line2 text-muted")}>
+              🔧 Fertigung
+            </button>
+            <button onClick={() => setF({ ...f, ist_fertigung: false })}
+                    className={"px-5 py-3 min-h-12 rounded-xl text-sm font-semibold border transition " +
+                      (!f.ist_fertigung ? "bg-muted/15 border-muted text-text"
+                                        : "border-line2 text-muted")}>
+              📦 Zukaufteil
+            </button>
+          </div>
+        </div>
+
+        <Feld label="Vermerk (optional)"
+              hinweis={neu ? "Erscheint neben dem Etikett, z. B. „Zubestellung 12.08.“"
+                           : "z. B. „Menge von 2 auf 4 erhöht“"}>
+          <input className={eingabeKlasse} value={f.notiz}
+                 onChange={e => setF({ ...f, notiz: e.target.value })} />
+        </Feld>
+
+        {!neu && pos.kennzeichnung === "original" ? (
+          <label className="flex items-start gap-3 bg-chip border border-line rounded-xl p-4 cursor-pointer">
+            <input type="checkbox" checked={alsGeaendert} className="mt-1 w-5 h-5 accent-[#ef4444]"
+                   onChange={e => setAlsGeaendert(e.target.checked)} />
+            <span className="text-sm">
+              <b>Als „Geändert" markieren</b>
+              <span className="block text-muted mt-0.5">
+                Setzt ein auffälliges rotes Etikett an die Position, damit die Abweichung
+                vom Original in der Werkstatt sofort auffällt.
+              </span>
+            </span>
+          </label>
+        ) : null}
+
+        <div className="flex gap-3 pt-1">
+          <Knopf onClick={speichern} disabled={speichert} className="flex-1">
+            {speichert ? "Speichert…" : "Speichern"}
+          </Knopf>
+          <Knopf art="geist" onClick={onSchliessen} disabled={speichert}>Abbrechen</Knopf>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+
+/* ---------- Start ---------------------------------------------------- */
+
+try {
+  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+} catch (e) {
+  document.getElementById("fehler").style.display = "block";
+  document.getElementById("fehlerText").textContent = e.message || String(e);
+}
+</script>
+</body>
+</html>
