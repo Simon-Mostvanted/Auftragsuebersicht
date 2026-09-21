@@ -1212,6 +1212,135 @@ function Archiv({ auftraege, onOeffnen }) {
 }
 
 
+/* =====================================================================
+   Lexware
+   ---------------------------------------------------------------------
+   Der WSA-Beleg ist in Lexware ein Lieferschein. Statt ihn von Hand
+   herunterzuladen und wieder hochzuladen, holt die App ihn direkt.
+   Positionen kommen dabei strukturiert - kein Erkennen aus dem PDF.
+
+   Gesprochen wird nicht direkt mit Lexware, sondern mit der Edge
+   Function `lieferschein` der Lieferschein-Maske. Dort liegt der
+   Lexware-Schlüssel als Secret; mit ihm käme man an die gesamte
+   Buchhaltung, er darf also nicht in diese Datei.
+   ===================================================================== */
+
+async function lexware(aktion, daten = {}) {
+  const { data, error } = await db.functions.invoke("lieferschein", {
+    body: { aktion, ...daten }
+  });
+
+  if (error) {
+    /* Bei Fehlern antwortet die Funktion mit 400 und einem Klartext im
+       Körper. Ohne das Auspacken stünde hier nur "non-2xx status code". */
+    let text = error.message || "Aufruf fehlgeschlagen.";
+    try {
+      const koerper = await error.context.json();
+      if (koerper && koerper.fehler) text = koerper.fehler;
+    } catch (e) {}
+    throw new Error(text);
+  }
+  if (data && data.fehler) throw new Error(data.fehler);
+  return data;
+}
+
+/** Base64 aus der Funktion in eine Datei, die sich hochladen lässt. */
+function base64ZuDatei(b64, name) {
+  const roh = atob(b64);
+  const bytes = new Uint8Array(roh.length);
+  for (let i = 0; i < roh.length; i++) bytes[i] = roh.charCodeAt(i);
+  return new File([bytes], name, { type: "application/pdf" });
+}
+
+/**
+ * Lieferscheine aus Lexware zum Auswählen.
+ *
+ * Gesucht wird im Browser, nicht in Lexware: Die Belegliste dort filtert
+ * nur nach Belegnummer und Kontakt-Kennung, nicht nach Kundennamen. Die
+ * Liste kommt ohnehin am Stück und wird in der Funktion zwischengespeichert.
+ */
+function LexwareAuswahl({ melde, onWahl, onSchliessen }) {
+  const [liste, setListe] = useState([]);
+  const [laedt, setLaedt] = useState(true);
+  const [fehler, setFehler] = useState("");
+  const [suche, setSuche] = useState("");
+  const [holt, setHolt] = useState("");
+
+  useEffect(() => {
+    let abgebrochen = false;
+    lexware("vorbelege", { typ: "lieferschein" })
+      .then(d => { if (!abgebrochen) { setListe(d.treffer || []); setLaedt(false); } })
+      .catch(e => { if (!abgebrochen) { setFehler(e.message || String(e)); setLaedt(false); } });
+    return () => { abgebrochen = true; };
+  }, []);
+
+  const gefiltert = useMemo(() => {
+    const s = suche.trim().toLowerCase();
+    if (!s) return liste.slice(0, 50);
+    return liste.filter(b =>
+      (b.nummer || "").toLowerCase().includes(s) ||
+      (b.kunde || "").toLowerCase().includes(s)
+    ).slice(0, 50);
+  }, [liste, suche]);
+
+  return (
+    <Dialog titel="Beleg aus Lexware holen"
+            unterzeile={laedt ? "Belege werden geladen…" : liste.length + " Lieferscheine"}
+            onSchliessen={onSchliessen} breit>
+
+      {fehler ? (
+        <div className="bg-bad/10 border border-bad/40 rounded-xl p-4 mb-4">
+          <p className="font-semibold text-[#fecaca]">Lexware ist nicht erreichbar.</p>
+          <p className="text-muted text-sm mt-1">{fehler}</p>
+          <p className="text-muted text-sm mt-2">
+            Der Auftrag lässt sich weiterhin von Hand anlegen.
+          </p>
+        </div>
+      ) : null}
+
+      {laedt ? <Lade text="Belege werden geladen…" /> : null}
+
+      {!laedt && !fehler ? (
+        <React.Fragment>
+          <input value={suche} onChange={e => setSuche(e.target.value)} autoFocus
+                 className={eingabeKlasse + " mb-4"}
+                 placeholder="Suchen nach Belegnummer oder Kunde…" />
+
+          {gefiltert.length === 0 ? (
+            <p className="text-muted text-center py-8">Nichts gefunden.</p>
+          ) : (
+            <div className="space-y-2 max-h-[50vh] overflow-y-auto">
+              {gefiltert.map(b => (
+                <button key={b.id} disabled={!!holt}
+                        onClick={async () => {
+                          setHolt(b.id);
+                          try { await onWahl(b); }
+                          catch (e) { melde("Holen fehlgeschlagen: " + (e.message || e), "bad"); setHolt(""); }
+                        }}
+                        className="w-full text-left bg-chip border border-line rounded-xl px-5 py-4
+                                   hover:border-accent transition flex flex-wrap items-center
+                                   gap-x-4 gap-y-1 disabled:opacity-40">
+                  <span className="font-bold">{b.nummer || "ohne Nummer"}</span>
+                  <span className="text-muted">{b.kunde || "—"}</span>
+                  <span className="text-muted text-sm ml-auto">{datumText(b.datum)}</span>
+                  {holt === b.id ? <span className="text-accent text-sm">wird geholt…</span> : null}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {liste.length > gefiltert.length ? (
+            <p className="text-muted text-xs mt-3">
+              Es werden 50 Treffer gezeigt — bei Bedarf weiter eingrenzen.
+            </p>
+          ) : null}
+        </React.Fragment>
+      ) : null}
+    </Dialog>
+  );
+}
+
+
 /* ---------- Neuer Auftrag -------------------------------------------- */
 
 function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde }) {
@@ -1231,6 +1360,65 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
   });
   const [zeigeKey, setZeigeKey] = useState(false);
   const [liest, setLiest] = useState("");   // Statustext während des Auslesens
+
+  const [zeigeLexware, setZeigeLexware] = useState(false);
+  const [lexwareId, setLexwareId] = useState("");   // gesetzt = kam aus Lexware
+
+  /**
+   * Einen Lieferschein aus Lexware übernehmen: Kopfdaten, Positionen und
+   * das PDF. Die Positionen kommen strukturiert - kein Erkennen nötig.
+   */
+  async function ausLexwareHolen(beleg) {
+    const d = await lexware("vorbeleg", { typ: "lieferschein", id: beleg.id });
+
+    /* `text`-Positionen sind Zwischenüberschriften ohne Menge. Sie tragen
+       bei euch üblicherweise den Bezug ("Mengen entsprechend Mail vom …") -
+       deshalb wandern sie in die Notiz statt verloren zu gehen. */
+    const alle   = d.positionen || [];
+    const texte  = alle.filter(p => p.type === "text")
+                       .map(p => [p.name, p.description].filter(Boolean).join(" ").trim())
+                       .filter(Boolean);
+    const posten = alle.filter(p => p.type !== "text");
+
+    setKopf(alt => ({
+      ...alt,
+      beleg_nr: d.nummer || beleg.nummer || alt.beleg_nr,
+      kunde:    (d.adresse && d.adresse.name) || beleg.kunde || alt.kunde,
+      notiz:    alt.notiz.trim() || texte.join(" · ")
+    }));
+
+    setZeilen(posten.map(p => ({
+      bezeichnung:   (p.name || "").trim(),
+      beschreibung:  (p.description || "").trim(),
+      menge:         p.quantity != null ? String(p.quantity) : "1",
+      einheit:       (p.unitName || "Stk").trim() || "Stk",
+      /* `material` verweist auf einen Artikel aus dem Lexware-Stamm - das
+         ist in aller Regel ein Zukaufteil. `custom` und `service` sind
+         freie Positionen, also eigene Arbeit. Ein Vorschlag, je Zeile
+         umschaltbar. */
+      ist_fertigung: p.type !== "material",
+      bereich:       bereichRaten((p.name || "") + " " + (p.description || ""), regeln) || ""
+    })).filter(z => z.bezeichnung));
+
+    setLexwareId(beleg.id);
+    setZeigeLexware(false);
+
+    /* Das PDF zum Schluss: Scheitert es, steht der Rest trotzdem schon
+       im Formular und der Beleg lässt sich von Hand nachreichen. */
+    try {
+      const p = await lexware("pdf", { id: beleg.id });
+      if (p && p.pdf) {
+        setDatei(base64ZuDatei(p.pdf, "WSA-" + (d.nummer || "Beleg") + ".pdf"));
+      }
+    } catch (e) {
+      melde("Positionen übernommen, aber das PDF kam nicht mit: " + (e.message || e), "bad");
+      return;
+    }
+
+    const zk = posten.filter(p => p.type === "material").length;
+    melde(posten.length + " Positionen aus Lexware übernommen" +
+          (zk ? ", " + zk + " als Zukaufteil vorgeschlagen" : "") + " — bitte prüfen.");
+  }
 
   function merkeKey(wert) {
     setApiKey(wert);
@@ -1330,6 +1518,7 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
           /* Der führende Bereich des Auftrags - er gilt für alle
              Positionen, die keinen eigenen tragen. */
           bereich:  bereich,
+          lexware_beleg_id: lexwareId || null,
           status:   "neu"
         })
         .select()
@@ -1341,6 +1530,7 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
           auftrag_id:    auftrag.id,
           pos_nr:        i + 1,
           bezeichnung:   z.bezeichnung.trim(),
+          beschreibung:  (z.beschreibung || "").trim() || null,
           menge:         z.menge ? Number(String(z.menge).replace(",", ".")) : null,
           einheit:       z.einheit.trim() || null,
           ist_fertigung: z.ist_fertigung,
@@ -1377,6 +1567,34 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
       <div className="flex items-center gap-4 mb-6">
         <Knopf art="geist" klein onClick={onAbbruch}>← Zurück</Knopf>
         <h1 className="text-2xl font-bold">Neuer Auftrag</h1>
+      </div>
+
+      {/* Der bequemste Weg zuerst: Beleg holen statt abtippen. */}
+      <div className={"rounded-2xl border p-5 mb-5 " +
+                      (lexwareId ? "bg-ok/10 border-ok/40" : "bg-panel border-line")}>
+        {lexwareId ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-xl">✓</span>
+            <div className="mr-auto">
+              <div className="font-semibold">Aus Lexware übernommen</div>
+              <div className="text-muted text-sm">
+                Positionen und PDF kommen direkt aus dem Beleg — bitte trotzdem durchsehen.
+              </div>
+            </div>
+            <Knopf art="geist" klein onClick={() => setZeigeLexware(true)}>Anderen Beleg</Knopf>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-xl">📥</span>
+            <div className="mr-auto">
+              <div className="font-semibold">Beleg aus Lexware holen</div>
+              <div className="text-muted text-sm">
+                Kopfdaten, Positionen und PDF auf einmal — nichts herunterladen, nichts abtippen.
+              </div>
+            </div>
+            <Knopf klein onClick={() => setZeigeLexware(true)}>Beleg auswählen</Knopf>
+          </div>
+        )}
       </div>
 
       <div className="bg-panel border border-line rounded-2xl p-6 mb-5">
@@ -1591,6 +1809,12 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
         </Knopf>
         <Knopf art="geist" onClick={onAbbruch} disabled={speichert}>Abbrechen</Knopf>
       </div>
+
+      {zeigeLexware ? (
+        <LexwareAuswahl melde={melde}
+                        onWahl={ausLexwareHolen}
+                        onSchliessen={() => setZeigeLexware(false)} />
+      ) : null}
     </div>
   );
 }
