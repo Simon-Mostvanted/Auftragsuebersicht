@@ -691,7 +691,7 @@ function Anwendung() {
   if (nameWaehlen || (!ichId && !admin)) {
     return (
       <React.Fragment>
-        <NamensAuswahl mitarbeiter={mitarbeiter} bereiche={bereiche} letzterName={letzterName}
+        <NamensAuswahl mitarbeiter={mitarbeiter} letzterName={letzterName}
                        onWahl={m => { anmelden(m); setNameWaehlen(false); }}
                        admin={admin} onAdmin={adminUmschalten} />
         {adminBlock}
@@ -804,13 +804,13 @@ function StartFehler({ text, onNochmal }) {
  * Kollegen buchen. Für den Normalfall gibt es die Schaltfläche
  * "Weiter als …" - ein Tipp statt zwei.
  */
-function NamensAuswahl({ mitarbeiter, bereiche, letzterName, onWahl, admin, onAdmin }) {
-  /* Alle, die in einem Werkstattbereich stehen. Wer 'buero' ist - Simon
-     und die Kollegen aus der Lieferschein-Maske - gehört nicht auf die
-     Kacheln am Werkstatt-Tablet. Kommt jemand für die Elektrik dazu,
-     genügt bereich = 'elektrik' und er erscheint hier. */
-  const werkstattBereiche = bereiche.map(b => b.schluessel);
-  const auswahl = mitarbeiter.filter(m => werkstattBereiche.includes(m.bereich));
+function NamensAuswahl({ mitarbeiter, letzterName, onWahl, admin, onAdmin }) {
+  /* Alle aktiven Mitarbeiter, unabhängig vom Bereich. Früher filterte
+     die Liste auf Werkstattbereiche und blendete damit 14 von 17 Leuten
+     aus - wer im Büro steht, arbeitet trotzdem an Aufträgen mit. Der
+     Bereich beschreibt jetzt nur noch, wo jemand arbeitet, und steuert
+     nicht mehr, wer sichtbar ist. */
+  const auswahl = mitarbeiter;
   const letzter = auswahl.find(m => m.name === letzterName);
 
   return (
@@ -825,7 +825,7 @@ function NamensAuswahl({ mitarbeiter, bereiche, letzterName, onWahl, admin, onAd
         {admin ? "🔓 Admin" : "🔒 Admin"}
       </button>
 
-      <div className="w-full max-w-2xl text-center">
+      <div className="w-full max-w-3xl text-center">
         <div className="text-4xl mb-3">🔧</div>
         <h1 className="text-2xl font-bold">Wer bist du?</h1>
         <p className="text-muted mt-2 mb-8">
@@ -841,11 +841,14 @@ function NamensAuswahl({ mitarbeiter, bereiche, letzterName, onWahl, admin, onAd
           </button>
         ) : null}
 
-        <div className="grid gap-4 sm:grid-cols-3">
+        {/* Dichter als früher: Mit siebzehn Namen wären dreispaltige
+            Großkacheln sechs Reihen hoch. Die Flächen bleiben trotzdem
+            deutlich über der Mindestgröße fürs Antippen. */}
+        <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
           {auswahl.map(m => (
             <button key={m.id} onClick={() => onWahl(m)}
-                    className="bg-panel border border-line rounded-2xl px-6 py-8 text-xl font-bold
-                               hover:border-accent hover:bg-panel2 transition active:scale-[0.98]">
+                    className="bg-panel border border-line rounded-2xl px-4 py-5 text-lg font-bold
+                               min-h-16 hover:border-accent hover:bg-panel2 transition active:scale-[0.98]">
               {m.name}
             </button>
           ))}
