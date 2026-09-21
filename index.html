@@ -270,6 +270,52 @@ const BELEG_PROMPT =
   "Mindermengenzuschlag oder Bearbeitungsgebühr. Ebenso keine Zwischensumme, Gesamtsumme, Netto, Brutto, " +
   "MwSt./Steuer und keine Kopf- oder Fußzeilen.";
 
+/** "09.10.2026" -> "2026-10-09". Alles andere -> "". */
+function datumAusText(s) {
+  const m = String(s || "").match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if (!m) return "";
+  return m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0");
+}
+
+/**
+ * Zerlegt den Kopfblock eines WSA-Belegs.
+ *
+ * Er kommt als `text`-Position und sieht immer gleich aus:
+ *
+ *   Fahrzeug: Ehemals Pommer
+ *   Kfz-Kennzeichen:
+ *   KM-Stand:
+ *   FIN:
+ *   Anlieferungsdatum:
+ *   Auslieferungsdatum: 09.10.2026
+ *
+ * Früher landete das komplett in der Notiz - samt leerer Zeilen und der
+ * beiden Termine. Jetzt geht jede Angabe dorthin, wo sie hingehört, und
+ * leere Felder fallen weg.
+ */
+function kopfblockZerlegen(text) {
+  const erg = { fahrzeug: "", kennzeichen: "", rest: [], von: "", bis: "" };
+
+  String(text || "").split(/\r?\n/).forEach(zeile => {
+    const m = zeile.match(/^\s*([^:]{2,30}):\s*(.*)$/);
+    if (!m) {
+      if (zeile.trim()) erg.rest.push(zeile.trim());
+      return;
+    }
+    const feld = m[1].trim().toLowerCase();
+    const wert = m[2].trim();
+    if (!wert) return;                       // leeres Feld - weglassen
+
+    if (feld === "fahrzeug")                 erg.fahrzeug = wert;
+    else if (feld.startsWith("kfz"))         erg.kennzeichen = wert;
+    else if (feld.startsWith("anlieferung")) erg.von = datumAusText(wert);
+    else if (feld.startsWith("auslieferung")) erg.bis = datumAusText(wert);
+    else erg.rest.push(m[1].trim() + ": " + wert);
+  });
+
+  return erg;
+}
+
 function warte(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 /** Datei in einen Inhaltsblock für die API verwandeln. PDFs gehen direkt. */
@@ -769,6 +815,7 @@ function Anwendung() {
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 pb-24">
         {ansicht.name === "board" ? (
           <Board auftraege={aufDemBoard} derBereich={derBereich} bereiche={bereiche}
+                 admin={admin}
                  onOeffnen={id => setAnsicht({ name: "detail", id })}
                  onNeu={() => setAnsicht({ name: "neu" })} />
         ) : null}
@@ -777,9 +824,10 @@ function Anwendung() {
           <Archiv auftraege={archivierte} onOeffnen={id => setAnsicht({ name: "detail", id })} />
         ) : null}
 
-        {ansicht.name === "neu" ? (
+        {/* Auch der Weg selbst ist gesperrt, nicht nur der Knopf. */}
+        {ansicht.name === "neu" && admin ? (
           <NeuerAuftrag
-            bereiche={bereiche} regeln={regeln} bereich={bereich}
+            bereiche={bereiche} regeln={regeln} bereich={bereich} ichId={ichId}
             onFertig={async () => { await ladeAuftraege(); setAnsicht({ name: "board" }); melde("Auftrag angelegt."); }}
             onAbbruch={() => setAnsicht({ name: "board" })}
             melde={melde}
@@ -1135,7 +1183,7 @@ function BoardSpalte({ spalte, liste, bereiche, onOeffnen }) {
 }
 
 
-function Board({ auftraege, derBereich, bereiche, onOeffnen, onNeu }) {
+function Board({ auftraege, derBereich, bereiche, admin, onOeffnen, onNeu }) {
   const ueberfaellige = auftraege.filter(a => a.ueberfaellig).length;
 
   return (
@@ -1151,7 +1199,9 @@ function Board({ auftraege, derBereich, bereiche, onOeffnen, onNeu }) {
               : "Alle Bereiche — jeder Auftrag einmal, über alle Gewerke gerechnet"}
           </p>
         </div>
-        <Knopf onClick={onNeu}>+ Neuer Auftrag</Knopf>
+        {/* Aufträge anlegen ist Adminsache. Nachbestellungen an einem
+            bestehenden Auftrag darf dagegen jeder ergänzen. */}
+        {admin ? <Knopf onClick={onNeu}>+ Neuer Auftrag</Knopf> : null}
       </div>
 
       {ueberfaellige > 0 ? (
@@ -1170,10 +1220,12 @@ function Board({ auftraege, derBereich, bereiche, onOeffnen, onNeu }) {
             Für diesen Bereich ist gerade nichts zu tun.
           </p>
           <p className="text-muted text-sm mt-1">
-            Aufträge erscheinen hier, sobald sie mindestens eine Fertigungsposition
-            für den Bereich enthalten.
+            Aufträge erscheinen hier, sobald sie mindestens eine Position
+            für diesen Bereich enthalten.
           </p>
-          <Knopf art="still" className="mt-5" onClick={onNeu}>Auftrag anlegen</Knopf>
+          {admin
+            ? <Knopf art="still" className="mt-5" onClick={onNeu}>Auftrag anlegen</Knopf>
+            : <p className="text-muted text-sm mt-3">Neue Aufträge legt das Büro an.</p>}
         </div>
       ) : (
         /* Drei Spalten nebeneinander im Landscape des Tablets, darunter
@@ -1449,7 +1501,7 @@ function LexwareAuswahl({ melde, onWahl, onSchliessen }) {
 
 /* ---------- Neuer Auftrag -------------------------------------------- */
 
-function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde }) {
+function NeuerAuftrag({ bereiche, regeln, bereich, ichId, onFertig, onAbbruch, melde }) {
   const [kopf, setKopf] = useState({
     beleg_nr: "", kunde: "", fahrzeug: "", notiz: "",
     vor_ort_von: "", vor_ort_bis: ""
@@ -1469,6 +1521,7 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
 
   const [zeigeLexware, setZeigeLexware] = useState(false);
   const [lexwareId, setLexwareId] = useState("");   // gesetzt = kam aus Lexware
+  const [verwerfenFragen, setVerwerfenFragen] = useState(false);
 
   /**
    * Einen Lieferschein aus Lexware übernehmen: Kopfdaten, Positionen und
@@ -1477,20 +1530,30 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
   async function ausLexwareHolen(beleg) {
     const d = await lexware("vorbeleg", { typ: "lieferschein", id: beleg.id });
 
-    /* `text`-Positionen sind Zwischenüberschriften ohne Menge. Sie tragen
-       bei euch üblicherweise den Bezug ("Mengen entsprechend Mail vom …") -
-       deshalb wandern sie in die Notiz statt verloren zu gehen. */
+    /* `text`-Positionen haben keine Menge. Beim WSA-Beleg steht dort der
+       Kopfblock mit Fahrzeug und Terminen - der wird zerlegt, statt roh
+       in die Notiz zu wandern. */
     const alle   = d.positionen || [];
-    const texte  = alle.filter(p => p.type === "text")
-                       .map(p => [p.name, p.description].filter(Boolean).join(" ").trim())
-                       .filter(Boolean);
     const posten = alle.filter(p => p.type !== "text");
+
+    const kopfText = alle.filter(p => p.type === "text")
+                         .map(p => [p.name, p.description].filter(Boolean).join("\n"))
+                         .join("\n");
+    const k = kopfblockZerlegen(kopfText);
+
+    /* Fahrzeug und Kennzeichen gehören zusammen in die Fahrzeugzeile.
+       Übrige ausgefüllte Angaben (KM-Stand, FIN, Unbekanntes) in die
+       Notiz. Leere Felder verschwinden. */
+    const fahrzeugZeile = [k.fahrzeug, k.kennzeichen].filter(Boolean).join(" · ");
 
     setKopf(alt => ({
       ...alt,
-      beleg_nr: d.nummer || beleg.nummer || alt.beleg_nr,
-      kunde:    (d.adresse && d.adresse.name) || beleg.kunde || alt.kunde,
-      notiz:    alt.notiz.trim() || texte.join(" · ")
+      beleg_nr:    d.nummer || beleg.nummer || alt.beleg_nr,
+      kunde:       (d.adresse && d.adresse.name) || beleg.kunde || alt.kunde,
+      fahrzeug:    alt.fahrzeug.trim() || fahrzeugZeile,
+      notiz:       alt.notiz.trim() || k.rest.join("\n"),
+      vor_ort_von: alt.vor_ort_von || k.von,
+      vor_ort_bis: alt.vor_ort_bis || k.bis
     }));
 
     setZeilen(posten.map(p => ({
@@ -1498,14 +1561,17 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
       beschreibung:  (p.description || "").trim(),
       menge:         p.quantity != null ? String(p.quantity) : "1",
       einheit:       (p.unitName || "Stk").trim() || "Stk",
-      /* `material` verweist auf einen Artikel aus dem Lexware-Stamm - das
-         ist in aller Regel ein Zukaufteil. `custom` und `service` sind
-         freie Positionen, also eigene Arbeit. Ein Vorschlag, je Zeile
-         umschaltbar. */
-      ist_fertigung: p.type !== "material",
-      bereich:       p.type === "material"
-                       ? BESTELL_BEREICH
-                       : (bereichRaten((p.name || "") + " " + (p.description || ""), regeln) || "")
+      /* ALLES kommt als Fertigung herein - bewusst ohne Vermutung.
+         Der Lexware-Positionstyp (`custom`, `material`, `service`) sagt
+         etwas darüber aus, wie der Beleg geschrieben wurde, nicht
+         darüber, ob ihr etwas fertigt oder kauft: Ein Beleg kam
+         durchgehend als `custom`, der nächste durchgehend als
+         `material`. Aus so einem Signal einen Vorschlag zu bauen macht
+         es schlimmer als gar keinen.
+         Zukaufteile werden also von Hand umgeschaltet - und ziehen dann
+         die Zuordnung ans Büro nach. */
+      ist_fertigung: true,
+      bereich:       bereichRaten((p.name || "") + " " + (p.description || ""), regeln) || ""
     })).filter(z => z.bezeichnung));
 
     setLexwareId(beleg.id);
@@ -1523,9 +1589,8 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
       return;
     }
 
-    const zk = posten.filter(p => p.type === "material").length;
-    melde(posten.length + " Positionen aus Lexware übernommen" +
-          (zk ? ", " + zk + " als Zukaufteil vorgeschlagen" : "") + " — bitte prüfen.");
+    melde(posten.length + " Positionen aus Lexware übernommen — " +
+          "alles als Fertigung. Zukaufteile bitte umschalten.");
   }
 
   function merkeKey(wert) {
@@ -1587,6 +1652,22 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
 
   function aendere(i, feld, wert) {
     setZeilen(alt => alt.map((z, k) => k === i ? { ...z, [feld]: wert } : z));
+  }
+
+  /**
+   * Alles auf Anfang. Nach einem Import, der nicht passt, musste man
+   * sonst das PDF entfernen und jede Zeile einzeln wegklicken.
+   */
+  function allesVerwerfen() {
+    setKopf({ beleg_nr: "", kunde: "", fahrzeug: "", notiz: "", vor_ort_von: "", vor_ort_bis: "" });
+    setZeilen([leereZeile()]);
+    setDatei(null);
+    if (dateiRef.current) dateiRef.current.value = "";
+    setLexwareId("");
+    setEinfuegen("");
+    setZeigeEinfuegen(false);
+    setVerwerfenFragen(false);
+    melde("Eingaben verworfen.");
   }
 
   /**
@@ -1659,6 +1740,7 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
           ist_fertigung: z.ist_fertigung,
           /* Leer heißt: erbt den Bereich des Auftrags. */
           bereich:       z.bereich || null,
+          erstellt_von:  ichId || null,
           kennzeichnung: "original"
         }))
       );
@@ -1931,7 +2013,27 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
           {speichert ? (datei ? "Speichert und lädt PDF hoch…" : "Speichert…") : "Auftrag anlegen"}
         </Knopf>
         <Knopf art="geist" onClick={onAbbruch} disabled={speichert}>Abbrechen</Knopf>
+
+        {/* Erst anbieten, wenn wirklich etwas dasteht - sonst ist es
+            ein Knopf ohne Wirkung. */}
+        {kopf.beleg_nr || kopf.kunde || datei || zeilen.some(z => z.bezeichnung.trim()) ? (
+          <Knopf art="geist" className="ml-auto" disabled={speichert}
+                 onClick={() => setVerwerfenFragen(true)}>
+            🗑 Alles verwerfen
+          </Knopf>
+        ) : null}
       </div>
+
+      {verwerfenFragen ? (
+        <LoeschDialog
+          titel="Alle Eingaben verwerfen"
+          text={"Kopfdaten, " + zeilen.filter(z => z.bezeichnung.trim()).length +
+                " Positionen" + (datei ? " und das PDF" : "") +
+                " werden aus dem Formular entfernt. Gespeichert wurde noch nichts."}
+          onJa={allesVerwerfen}
+          onSchliessen={() => setVerwerfenFragen(false)}
+        />
+      ) : null}
 
       {zeigeLexware ? (
         <LexwareAuswahl melde={melde}
@@ -2062,39 +2164,56 @@ function KommentarSpalte({ kommentare, bilder, laedt, ichId, admin, nameVon, mel
 function SkizzenDialog({ kommentare, bilder, ichId, admin, nameVon, melde, auftragId, nachladen, onSchliessen }) {
   const darfLoeschen = k => admin || (!!k.mitarbeiter_id && k.mitarbeiter_id === ichId);
 
-  const [datei, setDatei] = useState(null);
+  /* Mehrere Bilder auf einmal - am Tablet wählt man sonst sechsmal
+     hintereinander dieselbe Galerie. */
+  const [dateien, setDateien] = useState([]);
   const [text, setText] = useState("");
   const [sendet, setSendet] = useState(false);
+  const [fortschritt, setFortschritt] = useState("");
   const [loeschen, setLoeschen] = useState(null);
   const dateiRef = useRef(null);
 
   const mitBild = kommentare.filter(k => k.bild_pfad);
 
   async function hochladen() {
-    if (!datei) { melde("Bitte ein Bild wählen.", "bad"); return; }
+    if (dateien.length === 0) { melde("Bitte mindestens ein Bild wählen.", "bad"); return; }
     setSendet(true);
     try {
-      const endung = (datei.name.split(".").pop() || "jpg").toLowerCase();
-      const pfad = "kommentare/" + auftragId + "/" + Date.now() + "." + endung;
-      const { error } = await db.storage.from(BUCKET).upload(pfad, datei, {
-        contentType: datei.type || "image/jpeg", upsert: false
-      });
-      if (error) throw error;
+      /* Nacheinander, nicht parallel: Ein Tablet-WLAN verschluckt sich
+         an sechs gleichzeitigen Uploads, und so lässt sich anzeigen,
+         wie weit es ist. */
+      for (let i = 0; i < dateien.length; i++) {
+        const datei = dateien[i];
+        if (dateien.length > 1) setFortschritt("Bild " + (i + 1) + " von " + dateien.length + "…");
 
-      const { error: kFehler } = await db.from("kommentare").insert({
-        auftrag_id: auftragId,
-        mitarbeiter_id: ichId || null,
-        text: text.trim() || null,
-        bild_pfad: pfad
-      });
-      if (kFehler) throw kFehler;
+        const endung = (datei.name.split(".").pop() || "jpg").toLowerCase();
+        /* Laufende Nummer dazu: Bei mehreren Dateien in derselben
+           Millisekunde wäre der Pfad sonst zweimal gleich. */
+        const pfad = "kommentare/" + auftragId + "/" + Date.now() + "-" + i + "." + endung;
+        const { error } = await db.storage.from(BUCKET).upload(pfad, datei, {
+          contentType: datei.type || "image/jpeg", upsert: false
+        });
+        if (error) throw error;
 
-      setDatei(null); setText("");
+        const { error: kFehler } = await db.from("kommentare").insert({
+          auftrag_id: auftragId,
+          mitarbeiter_id: ichId || null,
+          /* Die Bildunterschrift gehört zum ersten Bild - sonst stünde
+             sie sechsmal gleich da. */
+          text: (i === 0 && text.trim()) ? text.trim() : null,
+          bild_pfad: pfad
+        });
+        if (kFehler) throw kFehler;
+      }
+
+      setDateien([]); setText(""); setFortschritt("");
       if (dateiRef.current) dateiRef.current.value = "";
       await nachladen();
-      melde("Bild hinzugefügt.");
+      melde(dateien.length === 1 ? "Bild hinzugefügt."
+                                 : dateien.length + " Bilder hinzugefügt.");
     } catch (e) {
       melde("Hochladen fehlgeschlagen: " + (e.message || e), "bad");
+      setFortschritt("");
     } finally {
       setSendet(false);
     }
@@ -2114,16 +2233,32 @@ function SkizzenDialog({ kommentare, bilder, ichId, admin, nameVon, melde, auftr
             onSchliessen={onSchliessen} breit>
       {/* Hochladen */}
       <div className="bg-chip border border-line rounded-xl p-4 mb-6">
-        {datei ? (
-          <div className="flex flex-wrap items-center gap-3 bg-ok/10 border border-ok/40 rounded-xl px-4 py-3">
-            <span className="text-lg">🖼</span>
-            <span className="truncate mr-auto text-sm">{datei.name}</span>
-            <button onClick={() => { setDatei(null); if (dateiRef.current) dateiRef.current.value = ""; }}
-                    className="text-muted hover:text-bad text-sm underline px-2 min-h-11">entfernen</button>
+        {dateien.length > 0 ? (
+          <div className="bg-ok/10 border border-ok/40 rounded-xl px-4 py-3">
+            <div className="flex flex-wrap items-center gap-3 mb-2">
+              <span className="text-lg">🖼</span>
+              <span className="font-semibold mr-auto">
+                {dateien.length === 1 ? "1 Bild gewählt" : dateien.length + " Bilder gewählt"}
+              </span>
+              <button onClick={() => { setDateien([]); if (dateiRef.current) dateiRef.current.value = ""; }}
+                      className="text-muted hover:text-bad text-sm underline px-2 min-h-11">
+                alle entfernen
+              </button>
+            </div>
+            <div className="space-y-1">
+              {dateien.map((d, i) => (
+                <div key={i} className="flex items-center gap-2 text-sm text-muted">
+                  <span className="truncate mr-auto">{d.name}</span>
+                  <span className="shrink-0 text-xs">{(d.size / 1024 / 1024).toFixed(1)} MB</span>
+                  <button onClick={() => setDateien(alt => alt.filter((_, k) => k !== i))}
+                          className="hover:text-bad px-1.5" aria-label="Entfernen">×</button>
+                </div>
+              ))}
+            </div>
           </div>
         ) : (
-          <input ref={dateiRef} type="file" accept="image/*"
-                 onChange={e => setDatei(e.target.files[0] || null)}
+          <input ref={dateiRef} type="file" accept="image/*" multiple
+                 onChange={e => setDateien(Array.from(e.target.files || []))}
                  className="block w-full text-sm text-muted file:mr-4 file:py-3 file:px-5
                             file:rounded-xl file:border-0 file:bg-panel2 file:text-text
                             file:font-semibold file:cursor-pointer hover:file:bg-line" />
@@ -2131,14 +2266,16 @@ function SkizzenDialog({ kommentare, bilder, ichId, admin, nameVon, melde, auftr
 
         <input className={eingabeKlasse + " mt-3"} value={text}
                onChange={e => setText(e.target.value)}
-               placeholder="Bildunterschrift (optional)" />
+               placeholder={dateien.length > 1
+                 ? "Bildunterschrift (optional, gilt fürs erste Bild)"
+                 : "Bildunterschrift (optional)"} />
 
         <div className="flex flex-wrap items-center gap-3 mt-3">
-          <Knopf klein onClick={hochladen} disabled={sendet || !datei}>
-            {sendet ? "Lädt hoch…" : "Hinzufügen"}
+          <Knopf klein onClick={hochladen} disabled={sendet || dateien.length === 0}>
+            {sendet ? (fortschritt || "Lädt hoch…") : "Hinzufügen"}
           </Knopf>
           <span className="text-muted text-xs">
-            Am Tablet lässt sich auch direkt die Kamera wählen.
+            Mehrere auf einmal möglich. Am Tablet lässt sich auch direkt die Kamera wählen.
           </span>
         </div>
       </div>
@@ -2356,6 +2493,12 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
      soll nichts gedämpft im Hintergrund stehen. */
   const gehoertMir = p => !bereich || (p.bereich || auftrag.bereich) === bereich;
 
+  /* Wegräumen darf nur, wer die Position selbst ergänzt hat - sonst
+     verschwindet die Nachbestellung eines Kollegen, auf die der sich
+     verlässt. Der Admin darf alles. Alte Positionen ohne Urheber
+     (erstellt_von = NULL) ebenfalls nur der Admin. */
+  const darfAendern = p => admin || (!!p.erstellt_von && p.erstellt_von === ichId);
+
   /* Zukaufteile zählen mit, wenn sie dem eigenen Bereich gehören - fürs
      Büro sind sie die Arbeit. Ob Zeit gebucht werden kann, entscheidet
      weiterhin allein `ist_fertigung`. */
@@ -2493,6 +2636,7 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
                          istAktiv={istAktiv}
                          admin={admin}
                          bereiche={bereiche}
+                         darfAendern={darfAendern(p)}
                          zeigeBereich={!bereich ? (p.bereich || auftrag.bereich) : null}
                          onZeit={() => setDialog({ art: "zeit", pos: p })}
                          onBuchungen={() => setDialog({ art: "buchungen", pos: p })}
@@ -2522,6 +2666,19 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
                 {!p.ist_fertigung ? <span className="text-muted text-sm">📦</span> : null}
                 <BereichBadge schluessel={p.bereich || auftrag.bereich} bereiche={bereiche} klein />
                 {p.erledigt ? <span className="text-ok text-sm">✓</span> : null}
+                {/* Auch hier: nur die eigene Nachbestellung, oder Admin. */}
+                {darfAendern(p) && !istArchiviert ? (
+                  <div className="ml-auto flex gap-3">
+                    <button onClick={() => setDialog({ art: "position", pos: p })}
+                            className="text-muted hover:text-text text-sm underline">
+                      bearbeiten
+                    </button>
+                    <button onClick={() => setDialog({ art: "posLoeschen", pos: p })}
+                            className="text-muted hover:text-bad text-sm underline">
+                      löschen
+                    </button>
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>
@@ -2565,7 +2722,7 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
 
       {dialog && dialog.art === "position" ? (
         <PositionDialog pos={dialog.pos} auftragId={auftragId}
-                        bereiche={bereiche} bereich={bereich} regeln={[]}
+                        bereiche={bereiche} bereich={bereich} ichId={ichId}
                         naechsteNr={positionen.length + 1} melde={melde}
                         onSchliessen={() => setDialog(null)}
                         onGespeichert={async () => { setDialog(null); await nachAenderung(); }} />
@@ -2803,7 +2960,7 @@ function BuchungenDialog({ pos, buchungen, mitarbeiter, nameVon, melde, onSchlie
 }
 
 
-function PositionZeile({ p, minuten, buchungen, nameVon, istAktiv, admin,
+function PositionZeile({ p, minuten, buchungen, nameVon, istAktiv, darfAendern,
                          bereiche, zeigeBereich,
                          onZeit, onBuchungen, onBearbeiten, onLoeschen, onErledigt }) {
   const [zeigeBuchungen, setZeigeBuchungen] = useState(false);
@@ -2888,7 +3045,9 @@ function PositionZeile({ p, minuten, buchungen, nameVon, istAktiv, admin,
           <Knopf art="geist" klein onClick={onBuchungen}>⏲ Zeiten korrigieren</Knopf>
         ) : null}
 
-        {admin ? (
+        {/* Ändern und Löschen nur für die eigene Nachbestellung -
+            oder als Admin. */}
+        {darfAendern && istAktiv ? (
           <React.Fragment>
             <Knopf art="still" klein onClick={onBearbeiten}>✎ Ändern</Knopf>
             <Knopf art="geist" klein onClick={onLoeschen}>Löschen</Knopf>
@@ -2987,7 +3146,7 @@ function ZeitDialog({ pos, ichName, ichId, melde, onSchliessen, onGebucht }) {
  * es nicht ohnehin schon eine Nachbestellung ist - so bleibt sichtbar,
  * dass sich gegenüber dem Original etwas verschoben hat.
  */
-function PositionDialog({ pos, auftragId, bereiche, bereich, naechsteNr, melde, onSchliessen, onGespeichert }) {
+function PositionDialog({ pos, auftragId, bereiche, bereich, ichId, naechsteNr, melde, onSchliessen, onGespeichert }) {
   const neu = !pos;
   const [posBereich, setPosBereich] = useState(pos && pos.bereich ? pos.bereich : "");
   const [f, setF] = useState({
@@ -3020,6 +3179,8 @@ function PositionDialog({ pos, auftragId, bereiche, bereich, naechsteNr, melde, 
       werte.auftrag_id = auftragId;
       werte.pos_nr = naechsteNr;
       werte.kennzeichnung = "neu";
+      /* Wer die Nachbestellung ergänzt, darf sie auch wieder löschen. */
+      werte.erstellt_von = ichId || null;
       ({ error } = await db.from("positionen").insert(werte));
     } else {
       if (pos.kennzeichnung === "original" && alsGeaendert) werte.kennzeichnung = "geaendert";
