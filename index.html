@@ -380,6 +380,32 @@ const eingabeKlasse =
   "w-full bg-chip border border-line rounded-xl px-4 py-3 text-base text-text " +
   "outline-none focus:border-accent placeholder:text-muted/60";
 
+/**
+ * Datumsfeld, bei dem der Kalender schon beim Antippen aufgeht - statt
+ * erst, wenn man das kleine Symbol am Rand trifft. Genau dafür gibt es
+ * showPicker(); ältere Browser ignorieren den Aufruf, dort bleibt das
+ * Symbol der Weg.
+ */
+function DatumFeld({ wert, onAendern, min, className = "" }) {
+  const feld = useRef(null);
+
+  function kalenderOeffnen() {
+    const el = feld.current;
+    if (!el || typeof el.showPicker !== "function") return;
+    /* Wirft, wenn der Browser den Aufruf nicht als Nutzeraktion sieht -
+       dann tut es einfach nichts, statt die App zu stoppen. */
+    try { el.showPicker(); } catch (e) {}
+  }
+
+  return (
+    <input ref={feld} type="date" value={wert} min={min || undefined}
+           onChange={e => onAendern(e.target.value)}
+           onClick={kalenderOeffnen}
+           onFocus={kalenderOeffnen}
+           className={eingabeKlasse + " cursor-pointer " + className} />
+  );
+}
+
 function Lade({ text = "Lädt…" }) {
   return (
     <div className="flex items-center gap-3 text-muted py-10 justify-center">
@@ -1383,12 +1409,14 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
             <Feld label="Anlieferung" hinweis="Ab diesem Tag steht der Auftrag in „In Arbeit“.">
-              <input type="date" className={eingabeKlasse} value={kopf.vor_ort_von}
-                     onChange={e => setKopf({ ...kopf, vor_ort_von: e.target.value })} />
+              <DatumFeld wert={kopf.vor_ort_von}
+                         onAendern={v => setKopf({ ...kopf, vor_ort_von: v })} />
             </Feld>
             <Feld label="Abholung" hinweis="Danach wird der Auftrag rot, wenn noch etwas offen ist.">
-              <input type="date" className={eingabeKlasse} value={kopf.vor_ort_bis}
-                     onChange={e => setKopf({ ...kopf, vor_ort_bis: e.target.value })} />
+              {/* Vor der Anlieferung gibt es nichts abzuholen - der
+                  Kalender sperrt diese Tage gleich. */}
+              <DatumFeld wert={kopf.vor_ort_bis} min={kopf.vor_ort_von}
+                         onAendern={v => setKopf({ ...kopf, vor_ort_bis: v })} />
             </Feld>
           </div>
           {kopf.vor_ort_von && kopf.vor_ort_bis && kopf.vor_ort_bis < kopf.vor_ort_von ? (
@@ -2304,12 +2332,12 @@ function KopfDialog({ auftrag, melde, onSchliessen, onGespeichert }) {
         </Feld>
         <div className="grid grid-cols-2 gap-3">
           <Feld label="Anlieferung">
-            <input type="date" className={eingabeKlasse} value={f.vor_ort_von}
-                   onChange={e => setF({ ...f, vor_ort_von: e.target.value })} />
+            <DatumFeld wert={f.vor_ort_von}
+                       onAendern={v => setF({ ...f, vor_ort_von: v })} />
           </Feld>
           <Feld label="Abholung">
-            <input type="date" className={eingabeKlasse} value={f.vor_ort_bis}
-                   onChange={e => setF({ ...f, vor_ort_bis: e.target.value })} />
+            <DatumFeld wert={f.vor_ort_bis} min={f.vor_ort_von}
+                       onAendern={v => setF({ ...f, vor_ort_bis: v })} />
           </Feld>
         </div>
         <Feld label="Notiz">
