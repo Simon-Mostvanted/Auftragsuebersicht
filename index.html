@@ -999,6 +999,17 @@ function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, derBereich, onBer
             <span className="text-muted text-xs">↩</span>
           </button>
 
+          {/* Nach einem Upload haelt der Browser die alte Fassung bis zu
+              zehn Minuten fest (GitHub Pages setzt max-age=600). Das
+              Anhaengsel umgeht den Zwischenspeicher - derselbe Knopf wie
+              im MV-Artikelmanager. */}
+          <button onClick={() => location.replace(location.pathname + "?r=" + Date.now())}
+                  title="App neu laden (Zwischenspeicher umgehen)"
+                  className="px-3 py-2.5 rounded-xl text-sm min-h-11 border transition
+                             bg-panel border-line text-muted hover:text-text">
+            🔄
+          </button>
+
           <button onClick={onAdmin}
                   title={admin ? "Admin-Modus beenden" : "Admin-Bereich freischalten"}
                   className={"px-3 py-2.5 rounded-xl text-sm min-h-11 border transition " +
