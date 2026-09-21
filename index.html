@@ -125,7 +125,8 @@ const SPALTEN = [
   { status: "neu",           titel: "Warteschlange", schrift: "text-accent", rahmen: "bg-accent/10 border-accent/40",
     leer: "Nichts angekündigt" },
   { status: "in_arbeit",     titel: "In Arbeit",     schrift: "text-warn",   rahmen: "bg-warn/10 border-warn/40",
-    leer: "Gerade nichts auf dem Hof" },
+    leer: "Gerade nichts auf dem Hof",
+    hinweis: "Überfällige zuerst, dann nach Übergabetermin" },
   { status: "abgeschlossen", titel: "Erledigt",      schrift: "text-ok",     rahmen: "bg-ok/10 border-ok/40",
     leer: "Noch nichts fertig" }
 ];
@@ -1169,11 +1170,15 @@ function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, derBereich, onBer
 function BoardSpalte({ spalte, liste, bereiche, onOeffnen }) {
   return (
     <section className={"rounded-2xl border p-4 " + spalte.rahmen}>
-      <h2 className="flex items-center gap-2.5 text-sm font-bold tracking-wider uppercase mb-4">
+      <h2 className="flex items-center gap-2.5 text-sm font-bold tracking-wider uppercase mb-1">
         <StatusPunkt status={spalte.status} />
         <span className={spalte.schrift}>{spalte.titel}</span>
         <span className="text-muted ml-auto">{liste.length}</span>
       </h2>
+      {/* Warum die Reihenfolge hier anders ist als in den übrigen Spalten. */}
+      {spalte.hinweis && liste.length > 1 ? (
+        <p className="text-muted text-xs mb-3">{spalte.hinweis}</p>
+      ) : <div className="mb-3"></div>}
 
       {liste.length === 0 ? (
         <p className="text-muted text-sm text-center py-6">{spalte.leer}</p>
@@ -1184,6 +1189,34 @@ function BoardSpalte({ spalte, liste, bereiche, onOeffnen }) {
       )}
     </section>
   );
+}
+
+
+/**
+ * Reihenfolge innerhalb einer Spalte.
+ *
+ * In der Warteschlange zählt, wann das Fahrzeug kommt - dort greift die
+ * Sortierung aus der Abfrage (nach `vor_ort_von`).
+ *
+ * In "In Arbeit" zählt etwas anderes: Was muss zuerst fertig werden.
+ * Deshalb zuoberst die überfälligen, darunter nach ABHOLtermin - der
+ * nächste Übergabetermin oben. Ohne Abholtermin nach hinten, die
+ * drängen niemanden.
+ */
+function spalteSortieren(status, liste) {
+  if (status !== "in_arbeit") return liste;
+
+  return liste.slice().sort((a, b) => {
+    if (!!a.ueberfaellig !== !!b.ueberfaellig) return a.ueberfaellig ? -1 : 1;
+
+    const x = a.vor_ort_bis || "";
+    const y = b.vor_ort_bis || "";
+    if (!x && !y) return 0;
+    if (!x) return 1;
+    if (!y) return -1;
+    /* ISO-Datum, da genügt der Textvergleich. */
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
 }
 
 
@@ -1237,7 +1270,8 @@ function Board({ auftraege, derBereich, bereiche, admin, onOeffnen, onNeu }) {
         <div className="grid gap-5 lg:grid-cols-3 items-start">
           {SPALTEN.map(s => (
             <BoardSpalte key={s.status} spalte={s}
-                         liste={auftraege.filter(a => a.bereich_status === s.status)}
+                         liste={spalteSortieren(s.status,
+                                  auftraege.filter(a => a.bereich_status === s.status))}
                          bereiche={bereiche}
                          onOeffnen={onOeffnen} />
           ))}
