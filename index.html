@@ -108,9 +108,10 @@ const ADMIN_PIN = "2017";
    Bereich 'buero' - dann erscheint er nicht bei den Namenskacheln. */
 const ADMIN_NAME = "Simon";
 
-/* Fällt weg, sobald jemand einen anderen Bereich wählt - dient nur als
-   Vorgabe beim ersten Öffnen und als Rückfallwert. */
-const STANDARD_BEREICH = "schweisserei";
+/* Bereich, dem Zukaufteile standardmäßig zufallen - bestellt wird im
+   Büro, nicht in der Werkstatt. Muss in werkstatt.bereiche stehen. */
+const BESTELL_BEREICH = "buero";
+
 const BUCKET  = "werkstatt-belege";
 
 /* Aufbau des Boards. `archiviert` taucht hier bewusst nicht auf -
@@ -545,10 +546,6 @@ function Anwendung() {
      jedem Öffnen neu gewählt, der letzte nur als Vorschlag gemerkt. */
   const [bereich, setBereich] = useState("");
   const [bereichWaehlen, setBereichWaehlen] = useState(false);
-  const [letzterBereich, setLetzterBereich] = useState(() => {
-    try { return localStorage.getItem("wsa_letzter_bereich") || STANDARD_BEREICH; }
-    catch (e) { return STANDARD_BEREICH; }
-  });
   const [laedt, setLaedt] = useState(true);
   const [startFehler, setStartFehler] = useState("");
   const [toast, setToast] = useState(null);
@@ -556,9 +553,6 @@ function Anwendung() {
   /* Wer arbeitet gerade am Tablet. Wird bei jedem Öffnen neu abgefragt;
      gemerkt wird nur der letzte Name für die "Weiter als …"-Schaltfläche. */
   const [ichId, setIchId] = useState("");
-  const [letzterName, setLetzterName] = useState(() => {
-    try { return localStorage.getItem("wsa_letzter_name") || ""; } catch (e) { return ""; }
-  });
 
   /* Admin-Modus: Aufträge ändern und löschen, Positionen bearbeiten.
      Gilt nur für diese Sitzung - beim nächsten Öffnen ist wieder der
@@ -575,10 +569,14 @@ function Anwendung() {
     setTimeout(() => setToast(null), art === "bad" ? 6000 : 3000);
   }, []);
 
+  /* Nach jeder Namenswahl kommt zwingend die Gewerkwahl - auch beim
+     Wechsel mitten im Betrieb. Wer das Tablet übernimmt, soll nicht im
+     Bereich des Vorgängers weiterarbeiten. */
   const anmelden = useCallback((m) => {
     setIchId(m.id);
-    setLetzterName(m.name);
-    try { localStorage.setItem("wsa_letzter_name", m.name); } catch (e) {}
+    setBereich("");
+    setNameWaehlen(false);
+    setBereichWaehlen(false);
   }, []);
 
   /* Das Board des gewählten Bereichs. Chronologisch nach Anlieferung -
@@ -635,12 +633,12 @@ function Anwendung() {
   const ich = useMemo(() => mitarbeiter.find(m => m.id === ichId), [mitarbeiter, ichId]);
   const derBereich = useMemo(() => bereiche.find(b => b.schluessel === bereich), [bereiche, bereich]);
 
+  /* Nichts wird gemerkt: Name und Gewerk werden bei jedem Öffnen und
+     nach jedem Wechsel bewusst neu gewählt. */
   const waehleBereich = useCallback((b) => {
     setBereich(b.schluessel);
-    setLetzterBereich(b.schluessel);
     setBereichWaehlen(false);
     setAnsicht({ name: "board" });
-    try { localStorage.setItem("wsa_letzter_bereich", b.schluessel); } catch (e) {}
   }, []);
 
   /* Vor der Namensauswahl gibt es nichts zu sehen - erst danach weiß die
@@ -691,8 +689,8 @@ function Anwendung() {
   if (nameWaehlen || (!ichId && !admin)) {
     return (
       <React.Fragment>
-        <NamensAuswahl mitarbeiter={mitarbeiter} letzterName={letzterName}
-                       onWahl={m => { anmelden(m); setNameWaehlen(false); }}
+        <NamensAuswahl mitarbeiter={mitarbeiter}
+                       onWahl={anmelden}
                        admin={admin} onAdmin={adminUmschalten} />
         {adminBlock}
         {toastBlock}
@@ -705,7 +703,7 @@ function Anwendung() {
   if (bereichWaehlen || !bereich) {
     return (
       <React.Fragment>
-        <BereichsAuswahl bereiche={bereiche} letzterBereich={letzterBereich}
+        <BereichsAuswahl bereiche={bereiche}
                          ich={ich} onWahl={waehleBereich}
                          abbrechbar={!!bereich}
                          onAbbruch={() => setBereichWaehlen(false)} />
@@ -804,14 +802,13 @@ function StartFehler({ text, onNochmal }) {
  * Kollegen buchen. Für den Normalfall gibt es die Schaltfläche
  * "Weiter als …" - ein Tipp statt zwei.
  */
-function NamensAuswahl({ mitarbeiter, letzterName, onWahl, admin, onAdmin }) {
+function NamensAuswahl({ mitarbeiter, onWahl, admin, onAdmin }) {
   /* Alle aktiven Mitarbeiter, unabhängig vom Bereich. Früher filterte
      die Liste auf Werkstattbereiche und blendete damit 14 von 17 Leuten
      aus - wer im Büro steht, arbeitet trotzdem an Aufträgen mit. Der
      Bereich beschreibt jetzt nur noch, wo jemand arbeitet, und steuert
      nicht mehr, wer sichtbar ist. */
   const auswahl = mitarbeiter;
-  const letzter = auswahl.find(m => m.name === letzterName);
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6 relative">
@@ -832,14 +829,9 @@ function NamensAuswahl({ mitarbeiter, letzterName, onWahl, admin, onAdmin }) {
           Wähle deinen Namen — gebuchte Zeiten und erledigte Positionen werden dir zugeordnet.
         </p>
 
-        {letzter ? (
-          <button onClick={() => onWahl(letzter)}
-                  className="w-full mb-6 bg-panel border border-line2 rounded-2xl px-6 py-4
-                             text-left hover:border-accent transition">
-            <span className="text-muted text-sm">Zuletzt hier</span>
-            <span className="block text-lg font-semibold">↩ Weiter als {letzter.name}</span>
-          </button>
-        ) : null}
+        {/* Bewusst KEINE "Weiter als …"-Abkürzung mehr: Sie lud dazu
+            ein, sich als der Vorgänger durchzutippen. Jeder wählt seinen
+            Namen selbst - das ist der Sinn der Zuordnung. */}
 
         {/* Dichter als früher: Mit siebzehn Namen wären dreispaltige
             Großkacheln sechs Reihen hoch. Die Flächen bleiben trotzdem
@@ -869,8 +861,7 @@ function NamensAuswahl({ mitarbeiter, letzterName, onWahl, admin, onAdmin }) {
  * Bereichsauswahl nach dem Namen. Bestimmt, wessen Positionen das Board
  * zählt - und damit, was der Kollege als seine Arbeit angezeigt bekommt.
  */
-function BereichsAuswahl({ bereiche, letzterBereich, ich, onWahl, abbrechbar, onAbbruch }) {
-  const letzter = bereiche.find(b => b.schluessel === letzterBereich);
+function BereichsAuswahl({ bereiche, ich, onWahl, abbrechbar, onAbbruch }) {
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6">
@@ -883,14 +874,8 @@ function BereichsAuswahl({ bereiche, letzterBereich, ich, onWahl, abbrechbar, on
           Das Board zeigt danach alle Aufträge, in denen für diesen Bereich etwas zu tun ist.
         </p>
 
-        {letzter ? (
-          <button onClick={() => onWahl(letzter)}
-                  className="w-full mb-6 bg-panel border border-line2 rounded-2xl px-6 py-4
-                             text-left hover:border-accent transition">
-            <span className="text-muted text-sm">Zuletzt hier</span>
-            <span className="block text-lg font-semibold">↩ Weiter in {letzter.name}</span>
-          </button>
-        ) : null}
+        {/* Auch hier keine Abkürzung: Nach jedem Namenswechsel soll das
+            Gewerk bewusst neu gewählt werden. */}
 
         <div className="grid gap-4 sm:grid-cols-3">
           {bereiche.map(b => (
@@ -1113,8 +1098,8 @@ function Kachel({ a, onClick }) {
   /* Nur die Positionen DIESES Bereichs. Dass hier nicht "3 von 27"
      steht, ist der Punkt: Sonst geht die eine Schweißarbeit im
      Werkstattauftrag unter. */
-  const gesamt   = a.bereich_fertigung || 0;
-  const erledigt = a.bereich_fertigung_erledigt || 0;
+  const gesamt   = a.bereich_positionen || 0;
+  const erledigt = a.bereich_erledigt || 0;
   const anteil   = gesamt > 0 ? Math.round((erledigt / gesamt) * 100) : 0;
   const fertig   = gesamt > 0 && erledigt === gesamt;
 
@@ -1171,9 +1156,9 @@ function Kachel({ a, onClick }) {
       {/* Wenn der Auftrag mehr umfasst, als diesen Bereich betrifft:
           sagen, wie viel - sonst wirkt die Detailansicht später
           unerwartet voll. */}
-      {a.anzahl_fertigung > gesamt ? (
+      {a.anzahl_positionen > gesamt ? (
         <div className="mt-2.5 text-xs text-muted">
-          Auftrag umfasst {a.anzahl_fertigung} Positionen insgesamt
+          Auftrag umfasst {a.anzahl_positionen} Positionen insgesamt
         </div>
       ) : null}
     </div>
@@ -1411,7 +1396,9 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
          freie Positionen, also eigene Arbeit. Ein Vorschlag, je Zeile
          umschaltbar. */
       ist_fertigung: p.type !== "material",
-      bereich:       bereichRaten((p.name || "") + " " + (p.description || ""), regeln) || ""
+      bereich:       p.type === "material"
+                       ? BESTELL_BEREICH
+                       : (bereichRaten((p.name || "") + " " + (p.description || ""), regeln) || "")
     })).filter(z => z.bezeichnung));
 
     setLexwareId(beleg.id);
@@ -1463,9 +1450,10 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
         menge:         String(p.menge || "1").replace(",", "."),
         einheit:       (p.einheit || "Stk").trim() || "Stk",
         ist_fertigung: p.art !== "zukauf",
-        /* Bereich aus den Stichwortregeln vorschlagen. Kein Treffer ->
-           leer, dann erbt die Position den Bereich des Auftrags. */
-        bereich:       bereichRaten(p.bezeichnung, regeln) || ""
+        /* Zukaufteile ans Büro, sonst aus den Stichwortregeln. Kein
+           Treffer -> leer, dann erbt die Position den Bereich des
+           Auftrags. */
+        bereich:       p.art === "zukauf" ? BESTELL_BEREICH : (bereichRaten(p.bezeichnung, regeln) || "")
       })).filter(p => p.bezeichnung);
 
       if (neue.length === 0) {
@@ -1492,6 +1480,20 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
 
   function aendere(i, feld, wert) {
     setZeilen(alt => alt.map((z, k) => k === i ? { ...z, [feld]: wert } : z));
+  }
+
+  /**
+   * Fertigung oder Zukaufteil - und gleich die passende Zuordnung.
+   * Zukaufteile werden bestellt, nicht gefertigt; das macht das Büro.
+   * Zurück auf Fertigung heißt wieder: macht der Bereich des Auftrags.
+   * Beides bleibt in derselben Zeile überstimmbar.
+   */
+  function setzeArt(i, istFertigung) {
+    setZeilen(alt => alt.map((z, k) => k === i ? {
+      ...z,
+      ist_fertigung: istFertigung,
+      bereich: istFertigung ? "" : BESTELL_BEREICH
+    } : z));
   }
 
   function uebernehmeBlock() {
@@ -1764,14 +1766,14 @@ function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde })
               </div>
 
               <div className="flex gap-2 mt-3 ml-9">
-                <button onClick={() => aendere(i, "ist_fertigung", true)}
+                <button onClick={() => setzeArt(i, true)}
                         className={"px-4 py-2 rounded-lg text-sm font-semibold min-h-10 border transition " +
                           (z.ist_fertigung
                             ? "bg-accent/15 border-accent text-accent"
                             : "bg-transparent border-line2 text-muted")}>
                   🔧 Fertigung
                 </button>
-                <button onClick={() => aendere(i, "ist_fertigung", false)}
+                <button onClick={() => setzeArt(i, false)}
                         className={"px-4 py-2 rounded-lg text-sm font-semibold min-h-10 border transition " +
                           (!z.ist_fertigung
                             ? "bg-muted/15 border-muted text-muted"
@@ -2243,9 +2245,11 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
      trägt - oder keinen eigenen hat und der Auftrag dem eigenen gehört. */
   const gehoertMir = p => (p.bereich || auftrag.bereich) === bereich;
 
-  const meine      = positionen.filter(p => p.ist_fertigung && gehoertMir(p));
-  const fremde     = positionen.filter(p => p.ist_fertigung && !gehoertMir(p));
-  const zukauf     = positionen.filter(p => !p.ist_fertigung);
+  /* Zukaufteile zählen mit, wenn sie dem eigenen Bereich gehören - fürs
+     Büro sind sie die Arbeit. Ob Zeit gebucht werden kann, entscheidet
+     weiterhin allein `ist_fertigung`. */
+  const meine      = positionen.filter(p => gehoertMir(p));
+  const fremde     = positionen.filter(p => !gehoertMir(p));
   const alleFertig = meine.length > 0 && meine.every(p => p.erledigt);
 
   const bildAnzahl    = kommentare.filter(k => k.bild_pfad).length;
@@ -2362,7 +2366,7 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
       <div className="space-y-3 mb-8">
         {meine.length === 0 ? (
           <p className="text-muted text-sm">
-            Für diesen Bereich ist an diesem Auftrag nichts zu fertigen.
+            Für diesen Bereich ist an diesem Auftrag nichts zu tun.
           </p>
         ) : null}
         {meine.map(p => (
@@ -2397,42 +2401,9 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
                   {p.bezeichnung}
                 </span>
                 {p.menge ? <span className="text-muted text-sm">{p.menge} {p.einheit || ""}</span> : null}
+                {!p.ist_fertigung ? <span className="text-muted text-sm">📦</span> : null}
                 <BereichBadge schluessel={p.bereich || auftrag.bereich} bereiche={bereiche} klein />
                 {p.erledigt ? <span className="text-ok text-sm">✓</span> : null}
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      {/* Zukaufteile */}
-      {zukauf.length > 0 ? (
-        <div className="mb-8">
-          <h2 className="text-sm font-bold text-muted tracking-wider uppercase mb-3">
-            Zukaufteile ({zukauf.length}) · nur Information
-          </h2>
-          <div className="space-y-2">
-            {zukauf.map(p => (
-              <div key={p.id}
-                   className="bg-panel/50 border border-line/60 border-dashed rounded-xl px-5 py-4
-                              flex flex-wrap items-center gap-x-4 gap-y-2">
-                <span className="text-muted text-lg">📦</span>
-                <span className="text-muted font-mono text-sm">{p.pos_nr}</span>
-                <span className="text-muted">{p.bezeichnung}</span>
-                {p.menge ? <span className="text-muted text-sm">{p.menge} {p.einheit || ""}</span> : null}
-                <KennzeichnungBadge art={p.kennzeichnung} notiz={p.kennzeichnung_notiz} />
-                {admin && !istArchiviert ? (
-                  <div className="ml-auto flex gap-3">
-                    <button onClick={() => setDialog({ art: "position", pos: p })}
-                            className="text-muted hover:text-text text-sm underline">
-                      bearbeiten
-                    </button>
-                    <button onClick={() => setDialog({ art: "posLoeschen", pos: p })}
-                            className="text-muted hover:text-bad text-sm underline">
-                      löschen
-                    </button>
-                  </div>
-                ) : null}
               </div>
             ))}
           </div>
@@ -2730,6 +2701,12 @@ function PositionZeile({ p, minuten, buchungen, nameVon, istAktiv, admin,
           </div>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-1.5">
             {p.menge ? <span className="text-muted text-sm">{p.menge} {p.einheit || ""}</span> : null}
+            {!p.ist_fertigung ? (
+              <span className="inline-flex items-center gap-1.5 text-muted text-xs
+                               border border-line2 rounded-lg px-2 py-0.5">
+                📦 Zukaufteil · bestellen
+              </span>
+            ) : null}
             <KennzeichnungBadge art={p.kennzeichnung} notiz={p.kennzeichnung_notiz} />
           </div>
           {p.beschreibung ? <p className="text-muted text-sm mt-2">{p.beschreibung}</p> : null}
@@ -2740,17 +2717,21 @@ function PositionZeile({ p, minuten, buchungen, nameVon, istAktiv, admin,
           ) : null}
         </div>
 
-        <div className="text-right shrink-0">
-          <button onClick={() => setZeigeBuchungen(v => !v)}
-                  disabled={buchungen.length === 0}
-                  className="text-xl font-bold disabled:cursor-default">
-            {minutenText(minuten)}
-          </button>
-          <div className="text-muted text-xs">
-            {buchungen.length === 0 ? "keine Buchung"
-              : buchungen.length + (buchungen.length === 1 ? " Buchung" : " Buchungen")}
+        {/* Zukaufteile haben keine Stundenerfassung - dort wäre eine
+            Zeitanzeige nur verwirrend. */}
+        {p.ist_fertigung ? (
+          <div className="text-right shrink-0">
+            <button onClick={() => setZeigeBuchungen(v => !v)}
+                    disabled={buchungen.length === 0}
+                    className="text-xl font-bold disabled:cursor-default">
+              {minutenText(minuten)}
+            </button>
+            <div className="text-muted text-xs">
+              {buchungen.length === 0 ? "keine Buchung"
+                : buchungen.length + (buchungen.length === 1 ? " Buchung" : " Buchungen")}
+            </div>
           </div>
-        </div>
+        ) : null}
       </div>
 
       {zeigeBuchungen && buchungen.length > 0 ? (
@@ -2769,9 +2750,12 @@ function PositionZeile({ p, minuten, buchungen, nameVon, istAktiv, admin,
       <div className="flex flex-wrap gap-3 mt-4 ml-10">
         {istAktiv ? (
           <React.Fragment>
-            <Knopf klein onClick={onZeit}>⏱ Zeit buchen</Knopf>
+            {/* Zeit buchen nur bei Fertigung. Abhaken geht bei beidem -
+                beim Zukaufteil heißt es: bestellt und da. */}
+            {p.ist_fertigung ? <Knopf klein onClick={onZeit}>⏱ Zeit buchen</Knopf> : null}
             <Knopf art={p.erledigt ? "geist" : "gut"} klein onClick={onErledigt}>
-              {p.erledigt ? "↩ Doch nicht erledigt" : "✓ Erledigt"}
+              {p.erledigt ? "↩ Doch nicht erledigt"
+                          : p.ist_fertigung ? "✓ Erledigt" : "✓ Bestellt & da"}
             </Knopf>
           </React.Fragment>
         ) : null}
@@ -2954,13 +2938,15 @@ function PositionDialog({ pos, auftragId, bereiche, bereich, naechsteNr, melde, 
         <div>
           <span className="block text-xs text-muted mb-1.5 font-medium">Art</span>
           <div className="flex gap-2">
-            <button onClick={() => setF({ ...f, ist_fertigung: true })}
+            {/* Wie im Anlegen-Formular: Zukaufteil zieht die Zuordnung
+                ans Büro nach, Fertigung gibt sie wieder frei. */}
+            <button onClick={() => { setF({ ...f, ist_fertigung: true }); setPosBereich(""); }}
                     className={"px-5 py-3 min-h-12 rounded-xl text-sm font-semibold border transition " +
                       (f.ist_fertigung ? "bg-accent/15 border-accent text-accent"
                                        : "border-line2 text-muted")}>
               🔧 Fertigung
             </button>
-            <button onClick={() => setF({ ...f, ist_fertigung: false })}
+            <button onClick={() => { setF({ ...f, ist_fertigung: false }); setPosBereich(BESTELL_BEREICH); }}
                     className={"px-5 py-3 min-h-12 rounded-xl text-sm font-semibold border transition " +
                       (!f.ist_fertigung ? "bg-muted/15 border-muted text-text"
                                         : "border-line2 text-muted")}>
