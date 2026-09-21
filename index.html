@@ -300,19 +300,26 @@ function kopfblockZerlegen(text) {
 
   String(text || "").split(/\r?\n/).forEach(zeile => {
     const m = zeile.match(/^\s*([^:]{2,30}):\s*(.*)$/);
-    if (!m) {
-      if (zeile.trim()) erg.rest.push(zeile.trim());
-      return;
-    }
+    if (!m) return;                          // keine "Feld: Wert"-Zeile
+
     const feld = m[1].trim().toLowerCase();
     const wert = m[2].trim();
     if (!wert) return;                       // leeres Feld - weglassen
 
-    if (feld === "fahrzeug")                 erg.fahrzeug = wert;
-    else if (feld.startsWith("kfz"))         erg.kennzeichen = wert;
-    else if (feld.startsWith("anlieferung")) erg.von = datumAusText(wert);
+    if (feld === "fahrzeug")                  erg.fahrzeug = wert;
+    else if (feld.startsWith("kfz") ||
+             feld.startsWith("kennzeichen"))  erg.kennzeichen = wert;
+    else if (feld.startsWith("km") ||
+             feld.startsWith("kilometer"))    erg.rest.push("KM-Stand: " + wert);
+    else if (feld === "fin" ||
+             feld.startsWith("fahrgestell"))  erg.rest.push("FIN: " + wert);
+    else if (feld.startsWith("anlieferung"))  erg.von = datumAusText(wert);
     else if (feld.startsWith("auslieferung")) erg.bis = datumAusText(wert);
-    else erg.rest.push(m[1].trim() + ": " + wert);
+    /* Alles andere fällt bewusst weg. In den Belegen stehen neben dem
+       Fahrzeugblock noch Abrechnungshinweise ("Ein Arbeitswert beträgt
+       60min"), Zwischenüberschriften ("Sonstige Arbeiten") und
+       Checklisten. Die vorher mitzunehmen hat die Notiz zugemüllt.
+       Weitere Fahrzeugfelder aufzunehmen ist je eine Zeile hier. */
   });
 
   return erg;
