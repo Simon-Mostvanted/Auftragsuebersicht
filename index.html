@@ -10,7 +10,6 @@
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"></script>
 
 <style type="text/tailwindcss">
@@ -102,22 +101,30 @@ const SUPABASE_KEY = "sb_publishable_bKycBdawzkSItE7G0YVamQ_ikkJMm0j";
 /* PIN für den Admin-Bereich: Aufträge ändern und löschen, Positionen
    bearbeiten. Der normale Werkstattbetrieb braucht keinen PIN mehr.
    >>> Vor dem Einsatz ändern. <<< */
-const ADMIN_PIN = "9317";
+const ADMIN_PIN = "2017";
 
 /* Unter diesem Namen laufen Änderungen aus dem Admin-Bereich. Der
    Mitarbeiter muss in werkstatt.mitarbeiter stehen (Update-03), aber im
    Bereich 'buero' - dann erscheint er nicht bei den Namenskacheln. */
 const ADMIN_NAME = "Simon";
 
-const BEREICH = "schweisserei";
+/* Fällt weg, sobald jemand einen anderen Bereich wählt - dient nur als
+   Vorgabe beim ersten Öffnen und als Rückfallwert. */
+const STANDARD_BEREICH = "schweisserei";
 const BUCKET  = "werkstatt-belege";
 
 /* Aufbau des Boards. `archiviert` taucht hier bewusst nicht auf -
    diese Aufträge liegen im Archiv-Reiter. */
+/* Wo eine Kachel landet, entscheidet die Datenbank (bereich_status) -
+   abgeleitet aus Anliefertermin und abgehakten Positionen. Hier steht
+   nur, wie die drei Spalten aussehen. */
 const SPALTEN = [
-  { status: "neu",           titel: "Neu",       schrift: "text-accent", rahmen: "bg-accent/10 border-accent/40" },
-  { status: "in_arbeit",     titel: "In Arbeit", schrift: "text-warn",   rahmen: "bg-warn/10 border-warn/40" },
-  { status: "abgeschlossen", titel: "Erledigt",  schrift: "text-ok",     rahmen: "bg-ok/10 border-ok/40" }
+  { status: "neu",           titel: "Warteschlange", schrift: "text-accent", rahmen: "bg-accent/10 border-accent/40",
+    leer: "Nichts angekündigt" },
+  { status: "in_arbeit",     titel: "In Arbeit",     schrift: "text-warn",   rahmen: "bg-warn/10 border-warn/40",
+    leer: "Gerade nichts auf dem Hof" },
+  { status: "abgeschlossen", titel: "Erledigt",      schrift: "text-ok",     rahmen: "bg-ok/10 border-ok/40",
+    leer: "Noch nichts fertig" }
 ];
 
 const STATUS_TEXT = {
@@ -150,6 +157,23 @@ function datumText(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+/** "2026-09-28" -> "Mo 28.09." - kurz genug für die Kachel. */
+function tagText(datum) {
+  if (!datum) return "";
+  const d = new Date(datum + "T00:00:00");
+  const wochentag = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"][d.getDay()];
+  return wochentag + " " + String(d.getDate()).padStart(2, "0") + "." +
+         String(d.getMonth() + 1).padStart(2, "0") + ".";
+}
+
+/** Der Zeitraum, in dem das Fahrzeug vor Ort ist, als eine Zeile. */
+function zeitraumText(von, bis) {
+  if (!von && !bis) return "kein Termin";
+  if (von && bis)   return tagText(von) + " – " + tagText(bis);
+  if (von)          return "ab " + tagText(von);
+  return "bis " + tagText(bis);
 }
 
 function datumZeitText(iso) {
@@ -388,18 +412,70 @@ function Dialog({ titel, unterzeile, onSchliessen, children, breit = false }) {
   );
 }
 
-/** Farbiges Etikett an einer Position: Zubestellung / Geändert. */
+/** Farbiges Etikett an einer Position: Nachbestellung / Geändert. */
 function KennzeichnungBadge({ art, notiz }) {
   if (art === "original") return null;
   const stil = art === "neu"
     ? "bg-warn/15 text-warn border-warn/40"
     : "bg-bad/15 text-bad border-bad/40";
-  const text = art === "neu" ? "ZUBESTELLUNG" : "GEÄNDERT";
+  const text = art === "neu" ? "NACHBESTELLUNG" : "GEÄNDERT";
   return (
     <span className={"inline-flex items-center gap-1.5 border rounded-lg px-2.5 py-1 text-xs font-bold tracking-wide " + stil}>
       {text}
       {notiz ? <span className="font-normal opacity-90">· {notiz}</span> : null}
     </span>
+  );
+}
+
+/**
+ * Schlägt anhand der Stichwortregeln einen Bereich für eine Position
+ * vor. Findet nichts -> null, dann erbt die Position den Bereich des
+ * Auftrags. Bewusst nur ein Vorschlag: korrigierbar bleibt alles.
+ */
+function bereichRaten(bezeichnung, regeln) {
+  const text = (bezeichnung || "").toLowerCase();
+  const treffer = regeln.find(r => r.aktiv !== false && text.includes(r.stichwort.toLowerCase()));
+  return treffer ? treffer.bereich : null;
+}
+
+/** Farbiges Etikett mit dem Bereich einer Position. */
+function BereichBadge({ schluessel, bereiche, klein = false }) {
+  const b = bereiche.find(x => x.schluessel === schluessel);
+  if (!b) return null;
+  return (
+    <span className={"inline-flex items-center gap-1.5 rounded-lg border font-semibold whitespace-nowrap " +
+                     (klein ? "px-2 py-0.5 text-xs" : "px-2.5 py-1 text-xs")}
+          style={{ color: b.farbe, borderColor: b.farbe + "66", background: b.farbe + "1a" }}>
+      {b.name}
+    </span>
+  );
+}
+
+/** Wann das Fahrzeug da ist - und ob die Abholung schon durch ist. */
+function TerminZeile({ a, gross = false }) {
+  const text = zeitraumText(a.vor_ort_von, a.vor_ort_bis);
+
+  let zusatz = null;
+  if (a.termin_lage === "geplant" && a.tage_bis_anlieferung != null) {
+    const t = a.tage_bis_anlieferung;
+    zusatz = t === 1 ? "morgen" : "in " + t + " Tagen";
+  } else if (a.termin_lage === "vor_ort") {
+    zusatz = "vor Ort";
+  } else if (a.termin_lage === "abholung_vorbei") {
+    zusatz = "Abholung vorbei";
+  }
+
+  const farbe = a.ueberfaellig ? "text-bad"
+              : a.termin_lage === "vor_ort" ? "text-warn"
+              : "text-muted";
+
+  return (
+    <div className={"flex flex-wrap items-center gap-x-2 gap-y-1 " +
+                    (gross ? "text-base" : "text-sm") + " " + farbe}>
+      <span>📅</span>
+      <span className="font-semibold">{text}</span>
+      {zusatz ? <span className="opacity-80">· {zusatz}</span> : null}
+    </div>
   );
 }
 
@@ -434,6 +510,19 @@ function Anwendung() {
   const [ansicht, setAnsicht] = useState({ name: "board" });
   const [mitarbeiter, setMitarbeiter] = useState([]);
   const [auftraege, setAuftraege] = useState([]);
+
+  /* Stammdaten, die überall gebraucht werden. */
+  const [bereiche, setBereiche] = useState([]);
+  const [regeln, setRegeln] = useState([]);
+
+  /* In welchem Bereich arbeitet das Tablet gerade. Wie beim Namen: bei
+     jedem Öffnen neu gewählt, der letzte nur als Vorschlag gemerkt. */
+  const [bereich, setBereich] = useState("");
+  const [bereichWaehlen, setBereichWaehlen] = useState(false);
+  const [letzterBereich, setLetzterBereich] = useState(() => {
+    try { return localStorage.getItem("wsa_letzter_bereich") || STANDARD_BEREICH; }
+    catch (e) { return STANDARD_BEREICH; }
+  });
   const [laedt, setLaedt] = useState(true);
   const [startFehler, setStartFehler] = useState("");
   const [toast, setToast] = useState(null);
@@ -466,52 +555,67 @@ function Anwendung() {
     try { localStorage.setItem("wsa_letzter_name", m.name); } catch (e) {}
   }, []);
 
-  const ladeAuftraege = useCallback(async () => {
+  /* Das Board des gewählten Bereichs. Chronologisch nach Anlieferung -
+     der nächste Termin steht oben. Aufträge ohne Termin landen hinten,
+     sie blockieren niemanden. */
+  const ladeAuftraege = useCallback(async (fuerBereich) => {
+    const b = fuerBereich || bereich;
+    if (!b) return;
     const { data, error } = await db
-      .from("v_auftrag_uebersicht")
+      .from("v_board")
       .select("*")
-      .eq("bereich", BEREICH)
-      .order("sortierung", { ascending: true })
+      .eq("board_bereich", b)
+      .order("vor_ort_von", { ascending: true, nullsFirst: false })
       .order("erstellt_am", { ascending: false });
     if (error) throw error;
     setAuftraege(data || []);
-  }, []);
+  }, [bereich]);
 
-  /* Reihenfolge nach dem Ziehen festhalten. Zehnerschritte, damit ein
-     neuer Auftrag mit 0 immer oben landet. */
-  const sortierungSpeichern = useCallback(async (ids) => {
-    const ergebnisse = await Promise.all(
-      ids.map((id, i) => db.from("auftraege").update({ sortierung: i * 10 }).eq("id", id))
-    );
-    const fehler = ergebnisse.find(r => r.error);
-    if (fehler) { melde("Reihenfolge konnte nicht gespeichert werden: " + fehler.error.message, "bad"); }
-    await ladeAuftraege();
-  }, [ladeAuftraege, melde]);
-
+  /* Stammdaten einmal beim Start. Personen kommen aus v_personen, nicht
+     aus der Tabelle - siehe docs/entscheidungen.md (E-08): Beim Umstieg
+     aufs Hub wird nur diese eine View umgehängt. */
   const ladeAlles = useCallback(async () => {
     setLaedt(true);
     setStartFehler("");
     try {
-      const { data: ma, error: maFehler } = await db
-        .from("mitarbeiter")
-        .select("*")
-        .eq("aktiv", true)
-        .order("name");
-      if (maFehler) throw maFehler;
-      setMitarbeiter(ma || []);
-      await ladeAuftraege();
+      const [ma, br, rg] = await Promise.all([
+        db.from("v_personen").select("*").eq("aktiv", true).order("name"),
+        db.from("bereiche").select("*").eq("aktiv", true).order("sortierung"),
+        db.from("bereich_regeln").select("*").eq("aktiv", true)
+      ]);
+      if (ma.error) throw ma.error;
+      if (br.error) throw br.error;
+      if (rg.error) throw rg.error;
+      setMitarbeiter(ma.data || []);
+      setBereiche(br.data || []);
+      setRegeln(rg.data || []);
     } catch (e) {
       setStartFehler(e.message || String(e));
     } finally {
       setLaedt(false);
     }
-  }, [ladeAuftraege]);
+  }, []);
 
   useEffect(() => { ladeAlles(); }, [ladeAlles]);
+
+  /* Aufträge erst nachladen, wenn ein Bereich feststeht. */
+  useEffect(() => {
+    if (!bereich) return;
+    ladeAuftraege(bereich).catch(e => setStartFehler(e.message || String(e)));
+  }, [bereich, ladeAuftraege]);
 
   const aufDemBoard = useMemo(() => auftraege.filter(a => a.status !== "archiviert"), [auftraege]);
   const archivierte = useMemo(() => auftraege.filter(a => a.status === "archiviert"), [auftraege]);
   const ich = useMemo(() => mitarbeiter.find(m => m.id === ichId), [mitarbeiter, ichId]);
+  const derBereich = useMemo(() => bereiche.find(b => b.schluessel === bereich), [bereiche, bereich]);
+
+  const waehleBereich = useCallback((b) => {
+    setBereich(b.schluessel);
+    setLetzterBereich(b.schluessel);
+    setBereichWaehlen(false);
+    setAnsicht({ name: "board" });
+    try { localStorage.setItem("wsa_letzter_bereich", b.schluessel); } catch (e) {}
+  }, []);
 
   /* Vor der Namensauswahl gibt es nichts zu sehen - erst danach weiß die
      App, wem sie Buchungen zuschreiben soll. */
@@ -561,10 +665,24 @@ function Anwendung() {
   if (nameWaehlen || (!ichId && !admin)) {
     return (
       <React.Fragment>
-        <NamensAuswahl mitarbeiter={mitarbeiter} letzterName={letzterName}
+        <NamensAuswahl mitarbeiter={mitarbeiter} bereiche={bereiche} letzterName={letzterName}
                        onWahl={m => { anmelden(m); setNameWaehlen(false); }}
                        admin={admin} onAdmin={adminUmschalten} />
         {adminBlock}
+        {toastBlock}
+      </React.Fragment>
+    );
+  }
+
+  /* Danach der Bereich. Ohne ihn wüsste das Board nicht, wessen
+     Positionen es zählen soll. */
+  if (bereichWaehlen || !bereich) {
+    return (
+      <React.Fragment>
+        <BereichsAuswahl bereiche={bereiche} letzterBereich={letzterBereich}
+                         ich={ich} onWahl={waehleBereich}
+                         abbrechbar={!!bereich}
+                         onAbbruch={() => setBereichWaehlen(false)} />
         {toastBlock}
       </React.Fragment>
     );
@@ -577,6 +695,8 @@ function Anwendung() {
         setAnsicht={setAnsicht}
         ich={ich}
         onNameWechseln={() => setNameWaehlen(true)}
+        derBereich={derBereich}
+        onBereichWechseln={() => setBereichWaehlen(true)}
         anzahlOffen={aufDemBoard.length}
         anzahlArchiv={archivierte.length}
         admin={admin}
@@ -591,10 +711,9 @@ function Anwendung() {
 
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 pb-24">
         {ansicht.name === "board" ? (
-          <Board auftraege={aufDemBoard}
+          <Board auftraege={aufDemBoard} derBereich={derBereich}
                  onOeffnen={id => setAnsicht({ name: "detail", id })}
-                 onNeu={() => setAnsicht({ name: "neu" })}
-                 onSortiert={sortierungSpeichern} />
+                 onNeu={() => setAnsicht({ name: "neu" })} />
         ) : null}
 
         {ansicht.name === "archiv" ? (
@@ -603,6 +722,7 @@ function Anwendung() {
 
         {ansicht.name === "neu" ? (
           <NeuerAuftrag
+            bereiche={bereiche} regeln={regeln} bereich={bereich}
             onFertig={async () => { await ladeAuftraege(); setAnsicht({ name: "board" }); melde("Auftrag angelegt."); }}
             onAbbruch={() => setAnsicht({ name: "board" })}
             melde={melde}
@@ -613,6 +733,8 @@ function Anwendung() {
           <Detail
             auftragId={ansicht.id}
             mitarbeiter={mitarbeiter}
+            bereiche={bereiche}
+            bereich={bereich}
             ichId={ichId}
             admin={admin}
             melde={melde}
@@ -656,10 +778,13 @@ function StartFehler({ text, onNochmal }) {
  * Kollegen buchen. Für den Normalfall gibt es die Schaltfläche
  * "Weiter als …" - ein Tipp statt zwei.
  */
-function NamensAuswahl({ mitarbeiter, letzterName, onWahl, admin, onAdmin }) {
-  /* Nur die Leute aus der Schweißerei. Simon steht im Bereich 'buero'
-     und gehört nicht auf die Kacheln. */
-  const auswahl = mitarbeiter.filter(m => m.bereich === BEREICH);
+function NamensAuswahl({ mitarbeiter, bereiche, letzterName, onWahl, admin, onAdmin }) {
+  /* Alle, die in einem Werkstattbereich stehen. Wer 'buero' ist - Simon
+     und die Kollegen aus der Lieferschein-Maske - gehört nicht auf die
+     Kacheln am Werkstatt-Tablet. Kommt jemand für die Elektrik dazu,
+     genügt bereich = 'elektrik' und er erscheint hier. */
+  const werkstattBereiche = bereiche.map(b => b.schluessel);
+  const auswahl = mitarbeiter.filter(m => werkstattBereiche.includes(m.bereich));
   const letzter = auswahl.find(m => m.name === letzterName);
 
   return (
@@ -711,6 +836,57 @@ function NamensAuswahl({ mitarbeiter, letzterName, onWahl, admin, onAdmin }) {
 }
 
 
+/**
+ * Bereichsauswahl nach dem Namen. Bestimmt, wessen Positionen das Board
+ * zählt - und damit, was der Kollege als seine Arbeit angezeigt bekommt.
+ */
+function BereichsAuswahl({ bereiche, letzterBereich, ich, onWahl, abbrechbar, onAbbruch }) {
+  const letzter = bereiche.find(b => b.schluessel === letzterBereich);
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-6">
+      <div className="w-full max-w-3xl text-center">
+        <div className="text-4xl mb-3">🏭</div>
+        <h1 className="text-2xl font-bold">
+          {ich ? ich.name + ", welcher Bereich?" : "Welcher Bereich?"}
+        </h1>
+        <p className="text-muted mt-2 mb-8">
+          Das Board zeigt danach alle Aufträge, in denen für diesen Bereich etwas zu tun ist.
+        </p>
+
+        {letzter ? (
+          <button onClick={() => onWahl(letzter)}
+                  className="w-full mb-6 bg-panel border border-line2 rounded-2xl px-6 py-4
+                             text-left hover:border-accent transition">
+            <span className="text-muted text-sm">Zuletzt hier</span>
+            <span className="block text-lg font-semibold">↩ Weiter in {letzter.name}</span>
+          </button>
+        ) : null}
+
+        <div className="grid gap-4 sm:grid-cols-3">
+          {bereiche.map(b => (
+            <button key={b.schluessel} onClick={() => onWahl(b)}
+                    className="bg-panel border rounded-2xl px-5 py-7 text-lg font-bold
+                               hover:bg-panel2 transition active:scale-[0.98]"
+                    style={{ borderColor: b.farbe + "66", color: b.farbe }}>
+              {b.name}
+            </button>
+          ))}
+        </div>
+
+        {bereiche.length === 0 ? (
+          <p className="text-muted mt-6">Es sind keine Bereiche hinterlegt.</p>
+        ) : null}
+
+        {abbrechbar ? (
+          <Knopf art="geist" className="mt-8" onClick={onAbbruch}>Abbrechen</Knopf>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+
 function AdminAnmeldung({ onOk, onSchliessen }) {
   const [wert, setWert] = useState("");
   const [fehler, setFehler] = useState("");
@@ -747,7 +923,8 @@ function AdminAnmeldung({ onOk, onSchliessen }) {
 }
 
 
-function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, anzahlOffen, anzahlArchiv, admin, onAdmin }) {
+function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, derBereich, onBereichWechseln,
+                     anzahlOffen, anzahlArchiv, admin, onAdmin }) {
   const reiter = [
     { id: "board",  text: "Aufträge", zahl: anzahlOffen },
     { id: "archiv", text: "Archiv",   zahl: anzahlArchiv }
@@ -757,10 +934,15 @@ function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, anzahlOffen, anza
       <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center gap-x-5 gap-y-3">
         <div className="flex items-center gap-3 mr-auto">
           <span className="bg-accent text-white rounded-lg px-2.5 py-1 text-xs font-bold tracking-wider">WSA</span>
-          <div className="leading-tight">
+          <button onClick={onBereichWechseln} title="Bereich wechseln"
+                  className="leading-tight text-left rounded-lg px-2 py-1 -mx-2 hover:bg-panel transition">
             <div className="font-bold">Auftragsübersicht</div>
-            <div className="text-muted text-xs font-medium">Schweißerei</div>
-          </div>
+            <div className="text-xs font-semibold flex items-center gap-1.5"
+                 style={{ color: derBereich ? derBereich.farbe : undefined }}>
+              {derBereich ? derBereich.name : "—"}
+              <span className="text-muted font-normal">↩</span>
+            </div>
+          </button>
         </div>
 
         <nav className="flex gap-2">
@@ -808,38 +990,12 @@ function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, anzahlOffen, anza
 /* ---------- Board ---------------------------------------------------- */
 
 /**
- * Eine Spalte des Boards. Die Karten lassen sich am Griff ziehen und
- * damit in eine Warteschlangen-Reihenfolge bringen - oben zuerst.
- *
- * Sortable verschiebt dabei die DOM-Knoten selbst. Danach lesen wir die
- * neue Reihenfolge aus dem DOM und geben sie an React weiter; weil der
- * neue Zustand dann genau dem entspricht, was ohnehin schon dasteht,
- * springt nichts.
+ * Eine Spalte des Boards. Nichts wird mehr von Hand einsortiert - die
+ * Reihenfolge ist chronologisch nach Anlieferung, und in welcher Spalte
+ * eine Karte steht, leitet die Datenbank aus Termin und abgehakten
+ * Positionen ab.
  */
-function BoardSpalte({ spalte, liste, onOeffnen, onSortiert }) {
-  const behaelter = useRef(null);
-
-  useEffect(() => {
-    if (!behaelter.current || !window.Sortable) return;
-    const s = window.Sortable.create(behaelter.current, {
-      animation: 150,
-      handle: ".griff",
-      draggable: ".karte",
-      ghostClass: "opacity-30",
-      /* Auf dem Tablet zieht man mit dem Finger - ohne kurze Verzögerung
-         löst schon das Scrollen einen Zug aus. */
-      delay: 120,
-      delayOnTouchOnly: true,
-      onEnd: (e) => {
-        if (e.oldIndex === e.newIndex) return;
-        const ids = Array.from(behaelter.current.querySelectorAll(".karte"))
-          .map(el => el.dataset.id);
-        onSortiert(ids);
-      }
-    });
-    return () => s.destroy();
-  }, [onSortiert]);
-
+function BoardSpalte({ spalte, liste, onOeffnen }) {
   return (
     <section className={"rounded-2xl border p-4 " + spalte.rahmen}>
       <h2 className="flex items-center gap-2.5 text-sm font-bold tracking-wider uppercase mb-4">
@@ -848,31 +1004,55 @@ function BoardSpalte({ spalte, liste, onOeffnen, onSortiert }) {
         <span className="text-muted ml-auto">{liste.length}</span>
       </h2>
 
-      <div ref={behaelter} className="grid gap-3 min-h-[3rem]">
-        {liste.map(a => <Kachel key={a.id} a={a} onClick={() => onOeffnen(a.id)} />)}
-      </div>
-
       {liste.length === 0 ? (
-        <p className="text-muted text-sm text-center py-6">—</p>
-      ) : null}
+        <p className="text-muted text-sm text-center py-6">{spalte.leer}</p>
+      ) : (
+        <div className="grid gap-3">
+          {liste.map(a => <Kachel key={a.id} a={a} onClick={() => onOeffnen(a.id)} />)}
+        </div>
+      )}
     </section>
   );
 }
 
 
-function Board({ auftraege, onOeffnen, onNeu, onSortiert }) {
+function Board({ auftraege, derBereich, onOeffnen, onNeu }) {
+  const ueberfaellige = auftraege.filter(a => a.ueberfaellig).length;
+
   return (
     <div>
-      <div className="flex items-center justify-between gap-4 mb-6">
-        <h1 className="text-2xl font-bold">Aufträge</h1>
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+        <div>
+          <h1 className="text-2xl font-bold">Aufträge</h1>
+          {derBereich ? (
+            <p className="text-muted text-sm mt-0.5">
+              Alles, wo für <span style={{ color: derBereich.farbe }}>{derBereich.name}</span> etwas zu tun ist
+            </p>
+          ) : null}
+        </div>
         <Knopf onClick={onNeu}>+ Neuer Auftrag</Knopf>
       </div>
+
+      {ueberfaellige > 0 ? (
+        <div className="bg-bad/15 border border-bad/50 rounded-2xl px-5 py-4 mb-5">
+          <b className="text-bad">
+            {ueberfaellige === 1 ? "Ein Auftrag ist überfällig" : ueberfaellige + " Aufträge sind überfällig"}
+          </b>
+          <span className="text-muted"> — Abholtermin vorbei, aber hier noch nicht alles erledigt.</span>
+        </div>
+      ) : null}
 
       {auftraege.length === 0 ? (
         <div className="bg-panel border border-line border-dashed rounded-2xl p-12 text-center">
           <div className="text-4xl mb-3">📋</div>
-          <p className="text-muted">Zurzeit kein Auftrag auf dem Board.</p>
-          <Knopf art="still" className="mt-5" onClick={onNeu}>Ersten Auftrag anlegen</Knopf>
+          <p className="text-muted">
+            Für diesen Bereich ist gerade nichts zu tun.
+          </p>
+          <p className="text-muted text-sm mt-1">
+            Aufträge erscheinen hier, sobald sie mindestens eine Fertigungsposition
+            für den Bereich enthalten.
+          </p>
+          <Knopf art="still" className="mt-5" onClick={onNeu}>Auftrag anlegen</Knopf>
         </div>
       ) : (
         /* Drei Spalten nebeneinander im Landscape des Tablets, darunter
@@ -880,8 +1060,8 @@ function Board({ auftraege, onOeffnen, onNeu, onSortiert }) {
         <div className="grid gap-5 lg:grid-cols-3 items-start">
           {SPALTEN.map(s => (
             <BoardSpalte key={s.status} spalte={s}
-                         liste={auftraege.filter(a => a.status === s.status)}
-                         onOeffnen={onOeffnen} onSortiert={onSortiert} />
+                         liste={auftraege.filter(a => a.bereich_status === s.status)}
+                         onOeffnen={onOeffnen} />
           ))}
         </div>
       )}
@@ -890,27 +1070,29 @@ function Board({ auftraege, onOeffnen, onNeu, onSortiert }) {
 }
 
 function Kachel({ a, onClick }) {
-  const gesamt   = a.anzahl_fertigung || 0;
-  const erledigt = a.anzahl_fertigung_erledigt || 0;
+  /* Nur die Positionen DIESES Bereichs. Dass hier nicht "3 von 27"
+     steht, ist der Punkt: Sonst geht die eine Schweißarbeit im
+     Werkstattauftrag unter. */
+  const gesamt   = a.bereich_fertigung || 0;
+  const erledigt = a.bereich_fertigung_erledigt || 0;
   const anteil   = gesamt > 0 ? Math.round((erledigt / gesamt) * 100) : 0;
   const fertig   = gesamt > 0 && erledigt === gesamt;
 
   return (
     <div data-id={a.id}
-         className="karte bg-panel border border-line rounded-2xl overflow-hidden
-                    hover:border-accent transition">
-      {/* Griff zum Ziehen. Getrennt von der Klickfläche, damit ein Tipp
-          auf die Karte weiterhin den Auftrag öffnet. */}
-      <div className="griff flex items-center justify-center gap-2 py-2 text-muted/60 text-sm
-                      cursor-grab active:cursor-grabbing select-none border-b border-line/60
-                      hover:text-muted hover:bg-panel2 transition"
-           title="Zum Sortieren ziehen">
-        ⠿ <span className="text-xs">ziehen</span>
-      </div>
+         onClick={onClick} role="button" tabIndex={0}
+         onKeyDown={e => { if (e.key === "Enter" || e.key === " ") onClick(); }}
+         className={"karte rounded-2xl border p-5 cursor-pointer transition text-left " +
+           (a.ueberfaellig
+             ? "bg-bad/10 border-bad hover:bg-bad/15"
+             : "bg-panel border-line hover:border-accent hover:bg-panel2")}>
 
-      <div onClick={onClick} role="button" tabIndex={0}
-           onKeyDown={e => { if (e.key === "Enter" || e.key === " ") onClick(); }}
-           className="text-left p-5 cursor-pointer hover:bg-panel2 transition">
+      {a.ueberfaellig ? (
+        <div className="text-bad text-xs font-bold tracking-wider uppercase mb-2">
+          ⚠ Überfällig
+        </div>
+      ) : null}
+
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="font-bold text-lg truncate">{a.beleg_nr || "ohne Beleg-Nr."}</div>
@@ -928,26 +1110,32 @@ function Kachel({ a, onClick }) {
 
       {a.fahrzeug ? <div className="text-muted text-sm mt-1.5 truncate">🚐 {a.fahrzeug}</div> : null}
 
+      <div className="mt-3">
+        <TerminZeile a={a} />
+      </div>
+
       <div className="mt-4">
         <div className="flex items-center justify-between text-sm mb-1.5">
           <span className={fertig ? "text-ok font-semibold" : "text-muted"}>
-            {erledigt}/{gesamt} Positionen
+            {erledigt}/{gesamt} {gesamt === 1 ? "Position" : "Positionen"} für dich
           </span>
-          <span className="text-muted">{minutenText(a.gebuchte_minuten)}</span>
+          <span className="text-muted">{minutenText(a.bereich_minuten)}</span>
         </div>
         <div className="h-2 bg-chip rounded-full overflow-hidden">
-          <div className={"h-full rounded-full transition-all " + (fertig ? "bg-ok" : "bg-accent")}
+          <div className={"h-full rounded-full transition-all " +
+                          (fertig ? "bg-ok" : a.ueberfaellig ? "bg-bad" : "bg-accent")}
                style={{ width: anteil + "%" }}></div>
         </div>
       </div>
 
-      {fertig && a.status !== "abgeschlossen" ? (
-        <div className="mt-3 text-xs text-ok font-semibold">✓ Alle Positionen erledigt</div>
+      {/* Wenn der Auftrag mehr umfasst, als diesen Bereich betrifft:
+          sagen, wie viel - sonst wirkt die Detailansicht später
+          unerwartet voll. */}
+      {a.anzahl_fertigung > gesamt ? (
+        <div className="mt-2.5 text-xs text-muted">
+          Auftrag umfasst {a.anzahl_fertigung} Positionen insgesamt
+        </div>
       ) : null}
-      {a.status === "abgeschlossen" ? (
-        <div className="mt-3 text-xs text-muted">Zum Archivieren antippen</div>
-      ) : null}
-      </div>
     </div>
   );
 }
@@ -1000,8 +1188,11 @@ function Archiv({ auftraege, onOeffnen }) {
 
 /* ---------- Neuer Auftrag -------------------------------------------- */
 
-function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
-  const [kopf, setKopf] = useState({ beleg_nr: "", kunde: "", fahrzeug: "", notiz: "" });
+function NeuerAuftrag({ bereiche, regeln, bereich, onFertig, onAbbruch, melde }) {
+  const [kopf, setKopf] = useState({
+    beleg_nr: "", kunde: "", fahrzeug: "", notiz: "",
+    vor_ort_von: "", vor_ort_bis: ""
+  });
   const [zeilen, setZeilen] = useState([leereZeile()]);
   const [datei, setDatei] = useState(null);
   const [einfuegen, setEinfuegen] = useState("");
@@ -1043,7 +1234,10 @@ function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
         bezeichnung:   (p.bezeichnung || "").trim(),
         menge:         String(p.menge || "1").replace(",", "."),
         einheit:       (p.einheit || "Stk").trim() || "Stk",
-        ist_fertigung: p.art !== "zukauf"
+        ist_fertigung: p.art !== "zukauf",
+        /* Bereich aus den Stichwortregeln vorschlagen. Kein Treffer ->
+           leer, dann erbt die Position den Bereich des Auftrags. */
+        bereich:       bereichRaten(p.bezeichnung, regeln) || ""
       })).filter(p => p.bezeichnung);
 
       if (neue.length === 0) {
@@ -1051,7 +1245,11 @@ function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
       } else {
         setZeilen(alt => alt.filter(z => z.bezeichnung.trim()).concat(neue));
         const zk = neue.filter(p => !p.ist_fertigung).length;
-        melde(neue.length + " Positionen erkannt" + (zk ? " (davon " + zk + " als Zukaufteil)" : "") + " — bitte prüfen.");
+        const zug = neue.filter(p => p.bereich).length;
+        melde(neue.length + " Positionen erkannt" +
+              (zk ? ", " + zk + " als Zukaufteil" : "") +
+              (zug ? ", " + zug + " einem anderen Bereich zugeordnet" : "") +
+              " — bitte prüfen.");
       }
     } catch (e) {
       melde("Auslesen fehlgeschlagen: " + (e.message || e), "bad");
@@ -1061,7 +1259,7 @@ function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
   }
 
   function leereZeile() {
-    return { bezeichnung: "", menge: "1", einheit: "Stk", ist_fertigung: true };
+    return { bezeichnung: "", menge: "1", einheit: "Stk", ist_fertigung: true, bereich: "" };
   }
 
   function aendere(i, feld, wert) {
@@ -1069,8 +1267,9 @@ function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
   }
 
   function uebernehmeBlock() {
-    const neue = zerlegeBlock(einfuegen);
-    if (neue.length === 0) { melde("Keine Zeilen erkannt.", "bad"); return; }
+    const roh = zerlegeBlock(einfuegen);
+    if (roh.length === 0) { melde("Keine Zeilen erkannt.", "bad"); return; }
+    const neue = roh.map(z => ({ ...z, bereich: bereichRaten(z.bezeichnung, regeln) || "" }));
     setZeilen(alt => {
       const bestand = alt.filter(z => z.bezeichnung.trim());
       return bestand.concat(neue);
@@ -1100,7 +1299,11 @@ function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
           kunde:    kopf.kunde.trim() || null,
           fahrzeug: kopf.fahrzeug.trim() || null,
           notiz:    kopf.notiz.trim() || null,
-          bereich:  BEREICH,
+          vor_ort_von: kopf.vor_ort_von || null,
+          vor_ort_bis: kopf.vor_ort_bis || null,
+          /* Der führende Bereich des Auftrags - er gilt für alle
+             Positionen, die keinen eigenen tragen. */
+          bereich:  bereich,
           status:   "neu"
         })
         .select()
@@ -1115,6 +1318,8 @@ function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
           menge:         z.menge ? Number(String(z.menge).replace(",", ".")) : null,
           einheit:       z.einheit.trim() || null,
           ist_fertigung: z.ist_fertigung,
+          /* Leer heißt: erbt den Bereich des Auftrags. */
+          bereich:       z.bereich || null,
           kennzeichnung: "original"
         }))
       );
@@ -1167,6 +1372,28 @@ function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
             <input className={eingabeKlasse} value={kopf.notiz}
                    onChange={e => setKopf({ ...kopf, notiz: e.target.value })} />
           </Feld>
+        </div>
+
+        {/* Der Termin bestimmt, wann der Auftrag von der Warteschlange
+            in die Arbeit rutscht - deshalb steht er hier und nicht unten. */}
+        <div className="bg-chip border border-line rounded-xl p-4 mt-5">
+          <div className="flex items-center gap-2 mb-3">
+            <span>📅</span>
+            <span className="font-semibold text-sm">Fahrzeug ist vor Ort</span>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Feld label="Anlieferung" hinweis="Ab diesem Tag steht der Auftrag in „In Arbeit“.">
+              <input type="date" className={eingabeKlasse} value={kopf.vor_ort_von}
+                     onChange={e => setKopf({ ...kopf, vor_ort_von: e.target.value })} />
+            </Feld>
+            <Feld label="Abholung" hinweis="Danach wird der Auftrag rot, wenn noch etwas offen ist.">
+              <input type="date" className={eingabeKlasse} value={kopf.vor_ort_bis}
+                     onChange={e => setKopf({ ...kopf, vor_ort_bis: e.target.value })} />
+            </Feld>
+          </div>
+          {kopf.vor_ort_von && kopf.vor_ort_bis && kopf.vor_ort_bis < kopf.vor_ort_von ? (
+            <p className="text-bad text-sm mt-2">Die Abholung liegt vor der Anlieferung.</p>
+          ) : null}
         </div>
 
         <div className="mt-5">
@@ -1294,6 +1521,21 @@ function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
                 {!z.ist_fertigung ? (
                   <span className="text-xs text-muted self-center ml-1">keine Stundenerfassung</span>
                 ) : null}
+
+                {/* Leer = macht der eigene Bereich. Nur die Ausnahme wird
+                    umgestellt - der Dachträger im Werkstattauftrag. */}
+                <select value={z.bereich} onChange={e => aendere(i, "bereich", e.target.value)}
+                        className="ml-auto bg-chip border border-line rounded-lg px-3 py-2 text-sm
+                                   min-h-10 outline-none focus:border-accent"
+                        style={z.bereich ? {
+                          color: (bereiche.find(b => b.schluessel === z.bereich) || {}).farbe,
+                          borderColor: ((bereiche.find(b => b.schluessel === z.bereich) || {}).farbe || "") + "66"
+                        } : undefined}>
+                  <option value="">macht der eigene Bereich</option>
+                  {bereiche.map(b => (
+                    <option key={b.schluessel} value={b.schluessel}>{b.name}</option>
+                  ))}
+                </select>
               </div>
             </div>
           ))}
@@ -1336,7 +1578,12 @@ function NeuerAuftrag({ onFertig, onAbbruch, melde }) {
  * Bilder werden hier nur als Vorschaubild gezeigt; hochgeladen und in
  * groß angesehen werden sie über "Skizzen/Fotos" im Auftragskopf.
  */
-function KommentarSpalte({ kommentare, bilder, laedt, ichId, nameVon, melde, auftragId, nachladen }) {
+function KommentarSpalte({ kommentare, bilder, laedt, ichId, admin, nameVon, melde, auftragId, nachladen }) {
+  /* Wegräumen darf nur, wer es hingeschrieben hat - sonst löscht jemand
+     die Notiz eines Kollegen weg, auf die der sich noch verlässt. Der
+     Admin darf alles. Alte Einträge ohne Namen ebenfalls nur der Admin. */
+  const darfLoeschen = k => admin || (!!k.mitarbeiter_id && k.mitarbeiter_id === ichId);
+
   const [text, setText] = useState("");
   const [sendet, setSendet] = useState(false);
   const [loeschen, setLoeschen] = useState(null);
@@ -1401,8 +1648,10 @@ function KommentarSpalte({ kommentare, bilder, laedt, ichId, nameVon, melde, auf
                 {k.mitarbeiter_id ? nameVon(k.mitarbeiter_id) : "ohne Namen"}
               </span>
               <span className="text-muted">{datumZeitText(k.erstellt_am)}</span>
-              <button onClick={() => setLoeschen(k)}
-                      className="ml-auto text-muted hover:text-bad underline">×</button>
+              {darfLoeschen(k) ? (
+                <button onClick={() => setLoeschen(k)} title="Löschen"
+                        className="ml-auto text-muted hover:text-bad underline">×</button>
+              ) : null}
             </div>
             {k.text ? <p className="text-sm whitespace-pre-wrap">{k.text}</p> : null}
             {k.bild_pfad && bilder[k.id] ? (
@@ -1435,7 +1684,9 @@ function KommentarSpalte({ kommentare, bilder, laedt, ichId, nameVon, melde, auf
  * Skizzen und Fotos zum Auftrag: hochladen und groß ansehen.
  * Technisch dieselben Kommentare - nur die mit Bild.
  */
-function SkizzenDialog({ kommentare, bilder, ichId, nameVon, melde, auftragId, nachladen, onSchliessen }) {
+function SkizzenDialog({ kommentare, bilder, ichId, admin, nameVon, melde, auftragId, nachladen, onSchliessen }) {
+  const darfLoeschen = k => admin || (!!k.mitarbeiter_id && k.mitarbeiter_id === ichId);
+
   const [datei, setDatei] = useState(null);
   const [text, setText] = useState("");
   const [sendet, setSendet] = useState(false);
@@ -1537,8 +1788,10 @@ function SkizzenDialog({ kommentare, bilder, ichId, nameVon, melde, auftragId, n
                 <div className="flex items-center gap-2 text-xs text-muted">
                   <span>{k.mitarbeiter_id ? nameVon(k.mitarbeiter_id) : "ohne Namen"}</span>
                   <span>{datumZeitText(k.erstellt_am)}</span>
-                  <button onClick={() => setLoeschen(k)}
-                          className="ml-auto hover:text-bad underline">löschen</button>
+                  {darfLoeschen(k) ? (
+                    <button onClick={() => setLoeschen(k)}
+                            className="ml-auto hover:text-bad underline">löschen</button>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -1561,7 +1814,8 @@ function SkizzenDialog({ kommentare, bilder, ichId, nameVon, melde, auftragId, n
 
 /* ---------- Detailansicht -------------------------------------------- */
 
-function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeaendert }) {
+function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde, onZurueck, onGeaendert }) {
+  const derBereichName = (bereiche.find(b => b.schluessel === bereich) || {}).name || "diesen Bereich";
   const [auftrag, setAuftrag] = useState(null);
   const [positionen, setPositionen] = useState([]);
   const [buchungen, setBuchungen] = useState([]);
@@ -1679,20 +1933,9 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
     await nachAenderung();
   }
 
-  async function abschliessen() {
-    if (!ichId) { melde("Dafür oben rechts einen Namen wählen.", "bad"); return; }
-    const { error } = await db.from("auftraege").update({
-      status: "abgeschlossen",
-      abgeschlossen_am: new Date().toISOString(),
-      abgeschlossen_von: ichId
-    }).eq("id", auftragId);
-    if (error) { melde("Fehler: " + error.message, "bad"); return; }
-    melde("Auftrag als erledigt markiert.");
-    await onZurueck();
-  }
-
-  /* Zweiter, getrennter Schritt: erst erledigt, dann irgendwann aus der
-     Ansicht nehmen. So bleibt Fertiges noch eine Weile sichtbar. */
+  /* "Als erledigt markieren" gibt es nicht mehr - fertig ist ein Auftrag,
+     wenn seine Positionen abgehakt sind. Bleibt nur das Archivieren, für
+     alles, was nie fertig wird: Kunde springt ab, Auftrag storniert. */
   async function archivieren() {
     const { error } = await db.from("auftraege").update({ status: "archiviert" }).eq("id", auftragId);
     if (error) { melde("Fehler: " + error.message, "bad"); return; }
@@ -1700,12 +1943,10 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
     await onZurueck();
   }
 
-  async function wiedereroeffnen() {
-    const { error } = await db.from("auftraege").update({
-      status: "in_arbeit", abgeschlossen_am: null, abgeschlossen_von: null
-    }).eq("id", auftragId);
+  async function zurueckAufsBoard() {
+    const { error } = await db.from("auftraege").update({ status: "in_arbeit" }).eq("id", auftragId);
     if (error) { melde("Fehler: " + error.message, "bad"); return; }
-    melde("Auftrag wieder geöffnet.");
+    melde("Auftrag zurück auf dem Board.");
     await nachAenderung();
   }
 
@@ -1732,24 +1973,27 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
     </div>
   );
 
-  const fertigung  = positionen.filter(p => p.ist_fertigung);
+  /* Eine Position gehört dem eigenen Bereich, wenn sie ihn ausdrücklich
+     trägt - oder keinen eigenen hat und der Auftrag dem eigenen gehört. */
+  const gehoertMir = p => (p.bereich || auftrag.bereich) === bereich;
+
+  const meine      = positionen.filter(p => p.ist_fertigung && gehoertMir(p));
+  const fremde     = positionen.filter(p => p.ist_fertigung && !gehoertMir(p));
   const zukauf     = positionen.filter(p => !p.ist_fertigung);
-  const alleFertig = fertigung.length > 0 && fertigung.every(p => p.erledigt);
+  const alleFertig = meine.length > 0 && meine.every(p => p.erledigt);
 
   const bildAnzahl    = kommentare.filter(k => k.bild_pfad).length;
   const istArchiviert = auftrag.status === "archiviert";
-  const istErledigt   = auftrag.status === "abgeschlossen";
-  /* Gebucht und abgehakt wird nur, solange der Auftrag läuft. */
-  const istAktiv      = !istArchiviert && !istErledigt;
+  /* Gebucht und abgehakt wird, solange der Auftrag nicht im Archiv liegt.
+     Ob er "fertig" ist, leitet sich aus den Positionen ab - dafür gibt es
+     keinen Schalter mehr. */
+  const istAktiv      = !istArchiviert;
 
   return (
     <div>
       <div className="flex flex-wrap items-center gap-4 mb-5">
         <Knopf art="geist" klein onClick={onZurueck}>← Zurück</Knopf>
-        <StatusPunkt status={auftrag.status} />
-        <span className="text-sm text-muted font-semibold uppercase tracking-wider">
-          {STATUS_TEXT[auftrag.status]}
-        </span>
+        <BereichBadge schluessel={bereich} bereiche={bereiche} />
         {admin ? (
           <Knopf art="gefahr" klein className="ml-auto"
                  onClick={() => setDialog({ art: "auftragLoeschen" })}>
@@ -1781,6 +2025,9 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
             <h1 className="text-2xl font-bold">{auftrag.beleg_nr || "ohne Beleg-Nr."}</h1>
             <p className="text-muted mt-1">{auftrag.kunde || "—"}</p>
             {auftrag.fahrzeug ? <p className="text-muted text-sm mt-0.5">🚐 {auftrag.fahrzeug}</p> : null}
+            <div className="mt-3">
+              <TerminZeile a={auftrag} gross />
+            </div>
             {auftrag.notiz ? <p className="text-sm mt-3 bg-chip border border-line rounded-xl px-4 py-3">{auftrag.notiz}</p> : null}
           </div>
           <div className="text-right">
@@ -1788,6 +2035,13 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
             <div className="text-muted text-sm">gebucht gesamt</div>
           </div>
         </div>
+
+        {auftrag.ueberfaellig ? (
+          <div className="mt-4 bg-bad/15 border border-bad/50 rounded-xl px-4 py-3 text-sm">
+            <b className="text-bad">Überfällig.</b>
+            <span className="text-muted"> Der Abholtermin ist vorbei, hier ist aber noch nicht alles erledigt.</span>
+          </div>
+        ) : null}
 
         <div className="flex flex-wrap gap-3 mt-5">
           {!auftrag.dokument_pfad ? (
@@ -1810,7 +2064,7 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
           </Knopf>
           {istAktiv
             ? <Knopf art="geist" klein onClick={() => setDialog({ art: "position", pos: null })}>
-                + Zubestellung
+                + Nachbestellung
               </Knopf>
             : null}
           {admin && istAktiv
@@ -1822,24 +2076,30 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
       </div>
 
       {alleFertig && istAktiv ? (
-        <div className="bg-ok/10 border border-ok/40 rounded-2xl p-5 mb-5 flex flex-wrap items-center gap-4">
-          <div className="mr-auto">
-            <div className="font-bold text-ok">Alle Fertigungspositionen sind erledigt.</div>
-            <div className="text-muted text-sm mt-0.5">Auftrag jetzt auf „Erledigt" setzen?</div>
+        <div className="bg-ok/10 border border-ok/40 rounded-2xl p-5 mb-5">
+          <div className="font-bold text-ok">Für {derBereichName} ist hier alles erledigt.</div>
+          <div className="text-muted text-sm mt-0.5">
+            {fremde.length > 0
+              ? "Andere Bereiche arbeiten noch am Auftrag."
+              : "Der Auftrag steht im Board unter „Erledigt“."}
           </div>
-          <Knopf art="gut" klein onClick={abschliessen}>Als erledigt markieren</Knopf>
         </div>
       ) : null}
 
-      {/* Fertigungspositionen */}
-      <h2 className="text-sm font-bold text-muted tracking-wider uppercase mb-3">
-        Fertigung ({fertigung.filter(p => p.erledigt).length}/{fertigung.length} erledigt)
+      {/* Die eigenen Positionen - das, wofür der Kollege hier ist. */}
+      <h2 className="flex flex-wrap items-center gap-2.5 text-sm font-bold text-muted tracking-wider uppercase mb-3">
+        <span>Für {derBereichName}</span>
+        <span className="opacity-70">
+          ({meine.filter(p => p.erledigt).length}/{meine.length} erledigt)
+        </span>
       </h2>
       <div className="space-y-3 mb-8">
-        {fertigung.length === 0 ? (
-          <p className="text-muted text-sm">Keine Fertigungspositionen.</p>
+        {meine.length === 0 ? (
+          <p className="text-muted text-sm">
+            Für diesen Bereich ist an diesem Auftrag nichts zu fertigen.
+          </p>
         ) : null}
-        {fertigung.map(p => (
+        {meine.map(p => (
           <PositionZeile key={p.id} p={p}
                          minuten={minutenJePosition[p.id] || 0}
                          buchungen={buchungen.filter(b => b.position_id === p.id)}
@@ -1853,6 +2113,31 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
                          onErledigt={() => erledigtUmschalten(p)} />
         ))}
       </div>
+
+      {/* Der Rest des Auftrags. Gedämpft und ohne Knöpfe: sichtbar als
+          Zusammenhang, aber erkennbar nicht die eigene Arbeit. */}
+      {fremde.length > 0 ? (
+        <div className="mb-8">
+          <h2 className="text-sm font-bold text-muted tracking-wider uppercase mb-3">
+            Andere Bereiche ({fremde.filter(p => p.erledigt).length}/{fremde.length} erledigt)
+          </h2>
+          <div className="space-y-2">
+            {fremde.map(p => (
+              <div key={p.id}
+                   className="bg-panel/40 border border-line/50 rounded-xl px-5 py-3.5
+                              flex flex-wrap items-center gap-x-4 gap-y-2">
+                <span className="text-muted font-mono text-sm w-6">{p.pos_nr}</span>
+                <span className={"text-muted " + (p.erledigt ? "line-through" : "")}>
+                  {p.bezeichnung}
+                </span>
+                {p.menge ? <span className="text-muted text-sm">{p.menge} {p.einheit || ""}</span> : null}
+                <BereichBadge schluessel={p.bereich || auftrag.bereich} bereiche={bereiche} klein />
+                {p.erledigt ? <span className="text-ok text-sm">✓</span> : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {/* Zukaufteile */}
       {zukauf.length > 0 ? (
@@ -1888,37 +2173,24 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
         </div>
       ) : null}
 
-      {/* Abschluss und Archivierung - bewusst zwei getrennte Schritte */}
+      {/* Kein "Erledigt"-Schalter mehr - fertig wird ein Auftrag durch
+          abgehakte Positionen. Bleibt das Archivieren für alles, was nie
+          fertig wird. */}
       <div className="border-t border-line pt-6 flex flex-wrap gap-3 items-center">
         {istAktiv ? (
           <React.Fragment>
-            <Knopf art={alleFertig ? "gut" : "still"} onClick={abschliessen}>
-              Als erledigt markieren
-            </Knopf>
-            {!alleFertig && fertigung.length > 0 ? (
-              <span className="text-muted text-sm">
-                Es sind noch nicht alle Fertigungspositionen abgehakt — geht trotzdem.
-              </span>
-            ) : null}
-          </React.Fragment>
-        ) : null}
-
-        {istErledigt ? (
-          <React.Fragment>
             <span className="text-muted text-sm mr-auto">
-              Erledigt am {datumText(auftrag.abgeschlossen_am)} von {nameVon(auftrag.abgeschlossen_von)}.
+              Der Auftrag wandert von selbst nach „Erledigt“, sobald alle
+              Positionen abgehakt sind.
             </span>
-            <Knopf art="geist" klein onClick={wiedereroeffnen}>Wieder öffnen</Knopf>
             <Knopf art="still" klein onClick={archivieren}>📦 Archivieren</Knopf>
           </React.Fragment>
         ) : null}
 
         {istArchiviert ? (
           <React.Fragment>
-            <span className="text-muted text-sm mr-auto">
-              Im Archiv. Erledigt am {datumText(auftrag.abgeschlossen_am)} von {nameVon(auftrag.abgeschlossen_von)}.
-            </span>
-            <Knopf art="geist" klein onClick={wiedereroeffnen}>Zurück aufs Board</Knopf>
+            <span className="text-muted text-sm mr-auto">Dieser Auftrag liegt im Archiv.</span>
+            <Knopf art="geist" klein onClick={zurueckAufsBoard}>Zurück aufs Board</Knopf>
           </React.Fragment>
         ) : null}
       </div>
@@ -1926,7 +2198,7 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
       </div>{/* Ende linke Spalte */}
 
       <KommentarSpalte kommentare={kommentare} bilder={bilder} laedt={kLaedt}
-                       ichId={ichId} nameVon={nameVon} melde={melde}
+                       ichId={ichId} admin={admin} nameVon={nameVon} melde={melde}
                        auftragId={auftragId} nachladen={ladeKommentare} />
       </div>{/* Ende Zweispalter */}
 
@@ -1938,6 +2210,7 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
 
       {dialog && dialog.art === "position" ? (
         <PositionDialog pos={dialog.pos} auftragId={auftragId}
+                        bereiche={bereiche} bereich={bereich} regeln={[]}
                         naechsteNr={positionen.length + 1} melde={melde}
                         onSchliessen={() => setDialog(null)}
                         onGespeichert={async () => { setDialog(null); await nachAenderung(); }} />
@@ -1952,7 +2225,7 @@ function Detail({ auftragId, mitarbeiter, ichId, admin, melde, onZurueck, onGeae
       ) : null}
 
       {dialog && dialog.art === "skizzen" ? (
-        <SkizzenDialog kommentare={kommentare} bilder={bilder} ichId={ichId}
+        <SkizzenDialog kommentare={kommentare} bilder={bilder} ichId={ichId} admin={admin}
                        nameVon={nameVon} melde={melde} auftragId={auftragId}
                        nachladen={ladeKommentare}
                        onSchliessen={() => setDialog(null)} />
@@ -1993,7 +2266,9 @@ function KopfDialog({ auftrag, melde, onSchliessen, onGespeichert }) {
     beleg_nr: auftrag.beleg_nr || "",
     kunde:    auftrag.kunde || "",
     fahrzeug: auftrag.fahrzeug || "",
-    notiz:    auftrag.notiz || ""
+    notiz:    auftrag.notiz || "",
+    vor_ort_von: auftrag.vor_ort_von || "",
+    vor_ort_bis: auftrag.vor_ort_bis || ""
   });
   const [speichert, setSpeichert] = useState(false);
 
@@ -2003,7 +2278,9 @@ function KopfDialog({ auftrag, melde, onSchliessen, onGespeichert }) {
       beleg_nr: f.beleg_nr.trim() || null,
       kunde:    f.kunde.trim() || null,
       fahrzeug: f.fahrzeug.trim() || null,
-      notiz:    f.notiz.trim() || null
+      notiz:    f.notiz.trim() || null,
+      vor_ort_von: f.vor_ort_von || null,
+      vor_ort_bis: f.vor_ort_bis || null
     }).eq("id", auftrag.id);
     if (error) { melde("Speichern fehlgeschlagen: " + error.message, "bad"); setSpeichert(false); return; }
     melde("Kopfdaten aktualisiert.");
@@ -2025,6 +2302,16 @@ function KopfDialog({ auftrag, melde, onSchliessen, onGespeichert }) {
           <input className={eingabeKlasse} value={f.fahrzeug}
                  onChange={e => setF({ ...f, fahrzeug: e.target.value })} />
         </Feld>
+        <div className="grid grid-cols-2 gap-3">
+          <Feld label="Anlieferung">
+            <input type="date" className={eingabeKlasse} value={f.vor_ort_von}
+                   onChange={e => setF({ ...f, vor_ort_von: e.target.value })} />
+          </Feld>
+          <Feld label="Abholung">
+            <input type="date" className={eingabeKlasse} value={f.vor_ort_bis}
+                   onChange={e => setF({ ...f, vor_ort_bis: e.target.value })} />
+          </Feld>
+        </div>
         <Feld label="Notiz">
           <textarea rows="2" className={eingabeKlasse} value={f.notiz}
                     onChange={e => setF({ ...f, notiz: e.target.value })} />
@@ -2323,13 +2610,14 @@ function ZeitDialog({ pos, ichName, ichId, melde, onSchliessen, onGebucht }) {
 
 
 /**
- * Position anlegen (Zubestellung) oder bearbeiten.
+ * Position anlegen (Nachbestellung) oder bearbeiten.
  * Beim Bearbeiten wird die Kennzeichnung auf `geaendert` gesetzt, sofern
- * es nicht ohnehin schon eine Zubestellung ist - so bleibt sichtbar,
+ * es nicht ohnehin schon eine Nachbestellung ist - so bleibt sichtbar,
  * dass sich gegenüber dem Original etwas verschoben hat.
  */
-function PositionDialog({ pos, auftragId, naechsteNr, melde, onSchliessen, onGespeichert }) {
+function PositionDialog({ pos, auftragId, bereiche, bereich, naechsteNr, melde, onSchliessen, onGespeichert }) {
   const neu = !pos;
+  const [posBereich, setPosBereich] = useState(pos && pos.bereich ? pos.bereich : "");
   const [f, setF] = useState({
     bezeichnung:   pos ? pos.bezeichnung : "",
     beschreibung:  pos && pos.beschreibung ? pos.beschreibung : "",
@@ -2351,6 +2639,7 @@ function PositionDialog({ pos, auftragId, naechsteNr, melde, onSchliessen, onGes
       menge:         f.menge ? Number(String(f.menge).replace(",", ".")) : null,
       einheit:       f.einheit.trim() || null,
       ist_fertigung: f.ist_fertigung,
+      bereich:       posBereich || null,
       kennzeichnung_notiz: f.notiz.trim() || null
     };
 
@@ -2366,13 +2655,13 @@ function PositionDialog({ pos, auftragId, naechsteNr, melde, onSchliessen, onGes
     }
 
     if (error) { melde("Speichern fehlgeschlagen: " + error.message, "bad"); setSpeichert(false); return; }
-    melde(neu ? "Zubestellung ergänzt." : "Position aktualisiert.");
+    melde(neu ? "Nachbestellung ergänzt." : "Position aktualisiert.");
     await onGespeichert();
   }
 
   return (
-    <Dialog titel={neu ? "Zubestellung ergänzen" : "Position ändern"}
-            unterzeile={neu ? "Wird auffällig als Zubestellung markiert." : pos.bezeichnung}
+    <Dialog titel={neu ? "Nachbestellung ergänzen" : "Position ändern"}
+            unterzeile={neu ? "Wird auffällig als Nachbestellung markiert." : pos.bezeichnung}
             onSchliessen={onSchliessen}>
       <div className="space-y-5">
         <Feld label="Bezeichnung">
@@ -2414,8 +2703,19 @@ function PositionDialog({ pos, auftragId, naechsteNr, melde, onSchliessen, onGes
           </div>
         </div>
 
+        <Feld label="Wer macht das?"
+              hinweis="Leer bedeutet: der Bereich des Auftrags. Nur umstellen, wenn ein anderer Bereich die Position fertigt.">
+          <select value={posBereich} onChange={e => setPosBereich(e.target.value)}
+                  className={eingabeKlasse}>
+            <option value="">— Bereich des Auftrags —</option>
+            {bereiche.map(b => (
+              <option key={b.schluessel} value={b.schluessel}>{b.name}</option>
+            ))}
+          </select>
+        </Feld>
+
         <Feld label="Vermerk (optional)"
-              hinweis={neu ? "Erscheint neben dem Etikett, z. B. „Zubestellung 12.08.“"
+              hinweis={neu ? "Erscheint neben dem Etikett, z. B. „Nachbestellung 12.08.“"
                            : "z. B. „Menge von 2 auf 4 erhöht“"}>
           <input className={eingabeKlasse} value={f.notiz}
                  onChange={e => setF({ ...f, notiz: e.target.value })} />
