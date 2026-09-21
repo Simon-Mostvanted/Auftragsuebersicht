@@ -103,10 +103,12 @@ const SUPABASE_KEY = "sb_publishable_bKycBdawzkSItE7G0YVamQ_ikkJMm0j";
    >>> Vor dem Einsatz ändern. <<< */
 const ADMIN_PIN = "2017";
 
-/* Unter diesem Namen laufen Änderungen aus dem Admin-Bereich. Der
-   Mitarbeiter muss in werkstatt.mitarbeiter stehen (Update-03), aber im
-   Bereich 'buero' - dann erscheint er nicht bei den Namenskacheln. */
-const ADMIN_NAME = "Simon";
+/* Unter diesem Namen laufen Änderungen aus dem Admin-Bereich. Eine
+   eigene Rollen-Kennung, keine Person: Simon arbeitet auch operativ mit
+   und hat dafür seine eigene Kachel. Der Eintrag muss in
+   werkstatt.mitarbeiter stehen (Update-14) und wird bei den
+   Namenskacheln ausgeblendet - hinein kommt man nur über den PIN. */
+const ADMIN_NAME = "Admin";
 
 /* Bereich, dem Zukaufteile standardmäßig zufallen - bestellt wird im
    Büro, nicht in der Werkstatt. Muss in werkstatt.bereiche stehen. */
@@ -719,16 +721,12 @@ function Anwendung() {
         setAdmin(true);
         setAdminDialog(false);
         setNameWaehlen(false);
-        /* Ohne bisherigen Namen unter der Admin-Kennung weiterarbeiten -
-           dann steht bei Änderungen ein Name statt einer Lücke. Wer schon
-           angemeldet ist, behält seinen eigenen: Er hat es ja getan.
-           Der Admin landet dabei gleich im Board seines eigenen Bereichs,
-           statt erst die Gewerkfrage zu durchlaufen - er kommt zum
-           Verwalten, nicht zum Arbeiten an einem Gewerk. */
-        if (!ichId) {
-          const adminMa = mitarbeiter.find(m => m.name === ADMIN_NAME);
-          if (adminMa) setIchId(adminMa.id);
-        }
+        /* IMMER auf die Admin-Kennung umstellen, auch wenn gerade ein
+           Kollege angemeldet ist. Sonst liefe alles, was im Admin-Modus
+           entsteht - Fotos, Kommentare, Nachbestellungen - unter dessen
+           Namen, obwohl es der Admin war. */
+        const adminMa = mitarbeiter.find(m => m.name === ADMIN_NAME);
+        if (adminMa) setIchId(adminMa.id);
         /* Kein Bereichsfilter: Der Admin schaut auf alle Gewerke
            zugleich. Ein einzelner Bereich lässt sich über die Kopfzeile
            weiterhin wählen. */
@@ -933,12 +931,11 @@ function StartFehler({ text, onNochmal }) {
  * "Weiter als …" - ein Tipp statt zwei.
  */
 function NamensAuswahl({ mitarbeiter, onWahl, admin, onAdmin }) {
-  /* Alle aktiven Mitarbeiter, unabhängig vom Bereich. Früher filterte
-     die Liste auf Werkstattbereiche und blendete damit 14 von 17 Leuten
-     aus - wer im Büro steht, arbeitet trotzdem an Aufträgen mit. Der
-     Bereich beschreibt jetzt nur noch, wo jemand arbeitet, und steuert
-     nicht mehr, wer sichtbar ist. */
-  const auswahl = mitarbeiter;
+  /* Alle aktiven Mitarbeiter, unabhängig vom Bereich - wer im Büro
+     steht, arbeitet trotzdem an Aufträgen mit. Nur die Rollen-Kennung
+     des Admin-Modus bleibt draußen: Dorthin kommt man über den PIN,
+     nicht durch Antippen. */
+  const auswahl = mitarbeiter.filter(m => m.name !== ADMIN_NAME);
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6 relative">
@@ -2056,6 +2053,11 @@ function NeuerAuftrag({ bereiche, regeln, bereich, ichId, onFertig, onAbbruch, m
  * groß angesehen werden sie über "Skizzen/Fotos" im Auftragskopf.
  */
 function KommentarSpalte({ kommentare, bilder, laedt, ichId, admin, nameVon, melde, auftragId, nachladen }) {
+  /* Nur Text. Bilder liefen hier mit und machten die Spalte
+     unübersichtlich - sie stehen jetzt ausschließlich hinter
+     "Skizzen/Fotos" im Auftragskopf. */
+  const nurText = kommentare.filter(k => !k.bild_pfad);
+
   /* Wegräumen darf nur, wer es hingeschrieben hat - sonst löscht jemand
      die Notiz eines Kollegen weg, auf die der sich noch verlässt. Der
      Admin darf alles. Alte Einträge ohne Namen ebenfalls nur der Admin. */
@@ -2094,7 +2096,7 @@ function KommentarSpalte({ kommentare, bilder, laedt, ichId, admin, nameVon, mel
       <div className="px-5 py-4 border-b border-line flex items-center gap-2.5">
         <span className="text-lg">💬</span>
         <h2 className="font-bold">Kommentare</h2>
-        <span className="text-muted text-sm ml-auto">{laedt ? "…" : kommentare.length}</span>
+        <span className="text-muted text-sm ml-auto">{laedt ? "…" : nurText.length}</span>
       </div>
 
       {/* Eingabe oben: Das Neueste steht direkt darunter. */}
@@ -2112,13 +2114,13 @@ function KommentarSpalte({ kommentare, bilder, laedt, ichId, admin, nameVon, mel
 
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
         {laedt ? <p className="text-muted text-sm text-center py-4">lädt…</p> : null}
-        {!laedt && kommentare.length === 0 ? (
+        {!laedt && nurText.length === 0 ? (
           <p className="text-muted text-sm text-center py-6">
             Noch nichts notiert.<br />Skizzen und Fotos über den Knopf im Auftragskopf.
           </p>
         ) : null}
 
-        {kommentare.map(k => (
+        {nurText.map(k => (
           <div key={k.id} className="border-l-2 border-line2 pl-3.5">
             <div className="flex items-baseline gap-2 text-xs mb-1">
               <span className="font-semibold text-sm">
@@ -2130,16 +2132,7 @@ function KommentarSpalte({ kommentare, bilder, laedt, ichId, admin, nameVon, mel
                         className="ml-auto text-muted hover:text-bad underline">×</button>
               ) : null}
             </div>
-            {k.text ? <p className="text-sm whitespace-pre-wrap">{k.text}</p> : null}
-            {k.bild_pfad && bilder[k.id] ? (
-              <a href={bilder[k.id]} target="_blank" rel="noopener noreferrer" className="block mt-2">
-                <img src={bilder[k.id]} alt="Skizze"
-                     className="w-full rounded-lg border border-line hover:border-accent transition" />
-              </a>
-            ) : null}
-            {k.bild_pfad && !bilder[k.id] ? (
-              <p className="text-muted text-xs mt-1">Bild wird geladen…</p>
-            ) : null}
+            <p className="text-sm whitespace-pre-wrap">{k.text}</p>
           </div>
         ))}
       </div>
