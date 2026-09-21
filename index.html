@@ -582,13 +582,18 @@ function Anwendung() {
   /* Das Board des gewählten Bereichs. Chronologisch nach Anlieferung -
      der nächste Termin steht oben. Aufträge ohne Termin landen hinten,
      sie blockieren niemanden. */
+  /* Ohne Bereich (Admin-Gesamtsicht) aus v_board_gesamt: eine Zeile je
+     Auftrag statt je Auftrag und Bereich. Mit Bereich aus v_board, auf
+     diesen gefiltert. Beide liefern dieselben Spaltennamen, die Kachel
+     merkt keinen Unterschied. */
   const ladeAuftraege = useCallback(async (fuerBereich) => {
-    const b = fuerBereich || bereich;
-    if (!b) return;
-    const { data, error } = await db
-      .from("v_board")
-      .select("*")
-      .eq("board_bereich", b)
+    const b = fuerBereich !== undefined ? fuerBereich : bereich;
+
+    let anfrage = b
+      ? db.from("v_board").select("*").eq("board_bereich", b)
+      : db.from("v_board_gesamt").select("*");
+
+    const { data, error } = await anfrage
       .order("vor_ort_von", { ascending: true, nullsFirst: false })
       .order("erstellt_am", { ascending: false });
     if (error) throw error;
@@ -622,11 +627,12 @@ function Anwendung() {
 
   useEffect(() => { ladeAlles(); }, [ladeAlles]);
 
-  /* Aufträge erst nachladen, wenn ein Bereich feststeht. */
+  /* Aufträge laden, sobald feststeht WAS gezeigt wird: ein Bereich - oder
+     im Admin-Modus die Gesamtsicht ohne Bereich. */
   useEffect(() => {
-    if (!bereich) return;
+    if (!bereich && !admin) return;
     ladeAuftraege(bereich).catch(e => setStartFehler(e.message || String(e)));
-  }, [bereich, ladeAuftraege]);
+  }, [bereich, admin, ladeAuftraege]);
 
   const aufDemBoard = useMemo(() => auftraege.filter(a => a.status !== "archiviert"), [auftraege]);
   const archivierte = useMemo(() => auftraege.filter(a => a.status === "archiviert"), [auftraege]);
@@ -675,14 +681,14 @@ function Anwendung() {
            Verwalten, nicht zum Arbeiten an einem Gewerk. */
         if (!ichId) {
           const adminMa = mitarbeiter.find(m => m.name === ADMIN_NAME);
-          if (adminMa) {
-            setIchId(adminMa.id);
-            const seiner = bereiche.find(b => b.schluessel === adminMa.bereich);
-            setBereich((seiner || bereiche[0] || {}).schluessel || "");
-            setBereichWaehlen(false);
-            setAnsicht({ name: "board" });
-          }
+          if (adminMa) setIchId(adminMa.id);
         }
+        /* Kein Bereichsfilter: Der Admin schaut auf alle Gewerke
+           zugleich. Ein einzelner Bereich lässt sich über die Kopfzeile
+           weiterhin wählen. */
+        setBereich("");
+        setBereichWaehlen(false);
+        setAnsicht({ name: "board" });
         melde("Admin-Modus aktiv.");
       }}
       onSchliessen={() => setAdminDialog(false)}
@@ -708,14 +714,32 @@ function Anwendung() {
   }
 
   /* Danach der Bereich. Ohne ihn wüsste das Board nicht, wessen
-     Positionen es zählen soll. */
-  if (bereichWaehlen || !bereich) {
+     Positionen es zählen soll - außer im Admin-Modus, der bewusst über
+     alle Gewerke schaut. */
+  if (bereichWaehlen || (!bereich && !admin)) {
     return (
       <React.Fragment>
-        <BereichsAuswahl bereiche={bereiche}
-                         ich={ich} onWahl={waehleBereich}
-                         abbrechbar={!!bereich}
-                         onAbbruch={() => setBereichWaehlen(false)} />
+        {/* Mit Kopfzeile, damit man über den Namen zurück zur
+            Namensauswahl kommt. Die Reiter bleiben weg - sie führten zu
+            einem Board, das ohne Bereich noch nicht existiert. */}
+        <div className="min-h-screen flex flex-col">
+          <Kopfzeile
+            ansicht={ansicht}
+            setAnsicht={setAnsicht}
+            ich={ich}
+            onNameWechseln={() => setNameWaehlen(true)}
+            derBereich={null}
+            onBereichWechseln={() => {}}
+            admin={admin}
+            onAdmin={adminUmschalten}
+            ohneReiter
+          />
+          <BereichsAuswahl bereiche={bereiche} admin={admin}
+                           ich={ich} onWahl={waehleBereich}
+                           abbrechbar={!!bereich || admin}
+                           onAbbruch={() => setBereichWaehlen(false)} />
+        </div>
+        {adminBlock}
         {toastBlock}
       </React.Fragment>
     );
@@ -744,7 +768,7 @@ function Anwendung() {
 
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 pb-24">
         {ansicht.name === "board" ? (
-          <Board auftraege={aufDemBoard} derBereich={derBereich}
+          <Board auftraege={aufDemBoard} derBereich={derBereich} bereiche={bereiche}
                  onOeffnen={id => setAnsicht({ name: "detail", id })}
                  onNeu={() => setAnsicht({ name: "neu" })} />
         ) : null}
@@ -784,19 +808,68 @@ function Anwendung() {
 }
 
 
+/**
+ * Zwei sehr verschiedene Fälle sahen bisher gleich aus und schickten
+ * beide zur Exposed-Schemas-Einstellung:
+ *
+ *   - Das Schema ist gar nicht erreichbar (Einstellung fehlt, Setup nie
+ *     gelaufen, kein Netz).
+ *   - Das Schema ist da, aber eine Tabelle oder Spalte fehlt - dann
+ *     passt bloß der Datenbankstand nicht zu dieser Fassung der App.
+ *
+ * Der zweite Fall hat mich dreimal in die falsche Richtung geschickt.
+ */
 function StartFehler({ text, onNochmal }) {
+  const standPasstNicht =
+    /Could not find the table|Could not find the '|does not exist|Invalid schema/i.test(text) &&
+    !/Invalid schema: werkstatt/i.test(text);
+
+  /* Was genau vermisst wird, steht in der Meldung - herausziehen, damit
+     man weiß, welches Update fehlt. */
+  const fehlendes = (text.match(/'([a-z_.]+)'/i) || [])[1];
+
   return (
     <div className="bg-bad/10 border border-bad/40 rounded-2xl p-6">
-      <h2 className="font-bold text-lg text-[#fecaca]">Keine Verbindung zur Datenbank</h2>
+      <h2 className="font-bold text-lg text-[#fecaca]">
+        {standPasstNicht ? "Datenbank passt nicht zu dieser Fassung"
+                         : "Keine Verbindung zur Datenbank"}
+      </h2>
+
       <p className="text-muted text-sm mt-2">
-        Die Anwendung erreicht das Schema <code className="bg-chip px-1.5 py-0.5 rounded">werkstatt</code> nicht.
+        {standPasstNicht
+          ? <React.Fragment>
+              Das Schema <code className="bg-chip px-1.5 py-0.5 rounded">werkstatt</code> ist
+              erreichbar, aber {fehlendes
+                ? <React.Fragment><code className="bg-chip px-1.5 py-0.5 rounded">{fehlendes}</code> fehlt darin</React.Fragment>
+                : "etwas fehlt darin"}.
+              Es steht also noch eine SQL-Datei aus.
+            </React.Fragment>
+          : <React.Fragment>
+              Die Anwendung erreicht das Schema <code className="bg-chip px-1.5 py-0.5 rounded">werkstatt</code> nicht.
+            </React.Fragment>}
       </p>
+
       <pre className="bg-chip border border-line rounded-xl p-3 mt-3 text-xs whitespace-pre-wrap text-muted">{text}</pre>
+
       <ul className="text-sm text-muted mt-4 space-y-1.5 list-disc pl-5">
-        <li>Wurde <b>Schweisserei-Supabase-Setup.sql</b> im Supabase SQL-Editor ausgeführt?</li>
-        <li>Steht <b>werkstatt</b> unter <i>Project Settings → API → Exposed schemas</i>?</li>
-        <li>Besteht eine Internetverbindung?</li>
+        {standPasstNicht ? (
+          <React.Fragment>
+            <li>Die noch nicht ausgeführten <b>Schweisserei-Update-*.sql</b> im SQL-Editor nachholen.</li>
+            <li>Welche fehlen, zeigt:<br />
+              <code className="bg-chip px-1.5 py-0.5 rounded text-xs">
+                select table_name from information_schema.tables where table_schema = 'werkstatt';
+              </code>
+            </li>
+          </React.Fragment>
+        ) : (
+          <React.Fragment>
+            <li>Wurde <b>Schweisserei-Supabase-Setup.sql</b> im Supabase SQL-Editor ausgeführt?</li>
+            <li>Steht <b>werkstatt</b> unter <i>Project Settings → API → Exposed schemas</i>?</li>
+            <li>Besteht eine Internetverbindung?</li>
+          </React.Fragment>
+        )}
       </ul>
+
       <Knopf art="still" className="mt-5" onClick={onNochmal}>Nochmal versuchen</Knopf>
     </div>
   );
@@ -870,10 +943,11 @@ function NamensAuswahl({ mitarbeiter, onWahl, admin, onAdmin }) {
  * Bereichsauswahl nach dem Namen. Bestimmt, wessen Positionen das Board
  * zählt - und damit, was der Kollege als seine Arbeit angezeigt bekommt.
  */
-function BereichsAuswahl({ bereiche, ich, onWahl, abbrechbar, onAbbruch }) {
+function BereichsAuswahl({ bereiche, admin, ich, onWahl, abbrechbar, onAbbruch }) {
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-6">
+    /* flex-1 statt min-h-screen: Die Kopfzeile steht darüber. */
+    <div className="flex-1 flex items-center justify-center p-6">
       <div className="w-full max-w-3xl text-center">
         <div className="text-4xl mb-3">🏭</div>
         <h1 className="text-2xl font-bold">
@@ -885,6 +959,16 @@ function BereichsAuswahl({ bereiche, ich, onWahl, abbrechbar, onAbbruch }) {
 
         {/* Auch hier keine Abkürzung: Nach jedem Namenswechsel soll das
             Gewerk bewusst neu gewählt werden. */}
+
+        {/* Nur im Admin-Modus: der Blick über alle Gewerke zugleich. */}
+        {admin ? (
+          <button onClick={() => onWahl({ schluessel: "" })}
+                  className="w-full mb-6 bg-panel border border-line2 rounded-2xl px-6 py-4
+                             text-left hover:border-accent transition">
+            <span className="text-muted text-sm">Admin</span>
+            <span className="block text-lg font-semibold">Alle Bereiche — Gesamtübersicht</span>
+          </button>
+        ) : null}
 
         <div className="grid gap-4 sm:grid-cols-3">
           {bereiche.map(b => (
@@ -947,7 +1031,7 @@ function AdminAnmeldung({ onOk, onSchliessen }) {
 
 
 function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, derBereich, onBereichWechseln,
-                     anzahlOffen, anzahlArchiv, admin, onAdmin }) {
+                     anzahlOffen, anzahlArchiv, admin, onAdmin, ohneReiter }) {
   const reiter = [
     { id: "board",  text: "Aufträge", zahl: anzahlOffen },
     { id: "archiv", text: "Archiv",   zahl: anzahlArchiv }
@@ -970,27 +1054,31 @@ function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, derBereich, onBer
               </button>
               <span className="text-muted text-sm">›</span>
               <button onClick={onBereichWechseln} title="Bereich wechseln"
-                      className="rounded-lg px-2 py-1.5 text-sm font-semibold transition hover:bg-panel"
+                      className={"rounded-lg px-2 py-1.5 text-sm font-semibold transition hover:bg-panel " +
+                        (!derBereich && admin ? "text-muted" : !derBereich ? "text-warn" : "")}
                       style={{ color: derBereich ? derBereich.farbe : undefined }}>
-                {derBereich ? derBereich.name : "Bereich wählen"}
+                {derBereich ? derBereich.name
+                            : admin ? "Alle Bereiche" : "Bereich wählen"}
               </button>
             </div>
           </div>
         </div>
 
-        <nav className="flex gap-2">
-          {reiter.map(r => (
-            <button key={r.id}
-                    onClick={() => setAnsicht({ name: r.id })}
-                    className={"px-4 py-2.5 rounded-xl text-sm font-semibold min-h-11 transition " +
-                      (ansicht.name === r.id || (r.id === "board" && ansicht.name === "detail")
-                        ? "bg-accent text-white"
-                        : "bg-panel border border-line text-muted hover:text-text")}>
-              {r.text}
-              <span className="ml-2 opacity-70">{r.zahl}</span>
-            </button>
-          ))}
-        </nav>
+        {ohneReiter ? null : (
+          <nav className="flex gap-2">
+            {reiter.map(r => (
+              <button key={r.id}
+                      onClick={() => setAnsicht({ name: r.id })}
+                      className={"px-4 py-2.5 rounded-xl text-sm font-semibold min-h-11 transition " +
+                        (ansicht.name === r.id || (r.id === "board" && ansicht.name === "detail")
+                          ? "bg-accent text-white"
+                          : "bg-panel border border-line text-muted hover:text-text")}>
+                {r.text}
+                <span className="ml-2 opacity-70">{r.zahl}</span>
+              </button>
+            ))}
+          </nav>
+        )}
 
         <div className="flex items-center gap-2">
           {/* Nach einem Upload haelt der Browser die alte Fassung bis zu
@@ -1026,7 +1114,7 @@ function Kopfzeile({ ansicht, setAnsicht, ich, onNameWechseln, derBereich, onBer
  * eine Karte steht, leitet die Datenbank aus Termin und abgehakten
  * Positionen ab.
  */
-function BoardSpalte({ spalte, liste, onOeffnen }) {
+function BoardSpalte({ spalte, liste, bereiche, onOeffnen }) {
   return (
     <section className={"rounded-2xl border p-4 " + spalte.rahmen}>
       <h2 className="flex items-center gap-2.5 text-sm font-bold tracking-wider uppercase mb-4">
@@ -1039,7 +1127,7 @@ function BoardSpalte({ spalte, liste, onOeffnen }) {
         <p className="text-muted text-sm text-center py-6">{spalte.leer}</p>
       ) : (
         <div className="grid gap-3">
-          {liste.map(a => <Kachel key={a.id} a={a} onClick={() => onOeffnen(a.id)} />)}
+          {liste.map(a => <Kachel key={a.id} a={a} bereiche={bereiche} onClick={() => onOeffnen(a.id)} />)}
         </div>
       )}
     </section>
@@ -1047,7 +1135,7 @@ function BoardSpalte({ spalte, liste, onOeffnen }) {
 }
 
 
-function Board({ auftraege, derBereich, onOeffnen, onNeu }) {
+function Board({ auftraege, derBereich, bereiche, onOeffnen, onNeu }) {
   const ueberfaellige = auftraege.filter(a => a.ueberfaellig).length;
 
   return (
@@ -1055,11 +1143,13 @@ function Board({ auftraege, derBereich, onOeffnen, onNeu }) {
       <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-2xl font-bold">Aufträge</h1>
-          {derBereich ? (
-            <p className="text-muted text-sm mt-0.5">
-              Alles, wo für <span style={{ color: derBereich.farbe }}>{derBereich.name}</span> etwas zu tun ist
-            </p>
-          ) : null}
+          <p className="text-muted text-sm mt-0.5">
+            {derBereich
+              ? <React.Fragment>
+                  Alles, wo für <span style={{ color: derBereich.farbe }}>{derBereich.name}</span> etwas zu tun ist
+                </React.Fragment>
+              : "Alle Bereiche — jeder Auftrag einmal, über alle Gewerke gerechnet"}
+          </p>
         </div>
         <Knopf onClick={onNeu}>+ Neuer Auftrag</Knopf>
       </div>
@@ -1092,6 +1182,7 @@ function Board({ auftraege, derBereich, onOeffnen, onNeu }) {
           {SPALTEN.map(s => (
             <BoardSpalte key={s.status} spalte={s}
                          liste={auftraege.filter(a => a.bereich_status === s.status)}
+                         bereiche={bereiche}
                          onOeffnen={onOeffnen} />
           ))}
         </div>
@@ -1100,7 +1191,7 @@ function Board({ auftraege, derBereich, onOeffnen, onNeu }) {
   );
 }
 
-function Kachel({ a, onClick }) {
+function Kachel({ a, bereiche, onClick }) {
   /* Nur die Positionen DIESES Bereichs. Dass hier nicht "3 von 27"
      steht, ist der Punkt: Sonst geht die eine Schweißarbeit im
      Werkstattauftrag unter. */
@@ -1141,6 +1232,15 @@ function Kachel({ a, onClick }) {
 
       {a.fahrzeug ? <div className="text-muted text-sm mt-1.5 truncate">🚐 {a.fahrzeug}</div> : null}
 
+      {/* Nur in der Gesamtsicht: welche Gewerke an dem Auftrag hängen. */}
+      {a.beteiligte_bereiche && a.beteiligte_bereiche.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5 mt-2.5">
+          {a.beteiligte_bereiche.map(b => (
+            <BereichBadge key={b} schluessel={b} bereiche={bereiche} klein />
+          ))}
+        </div>
+      ) : null}
+
       <div className="mt-3">
         <TerminZeile a={a} />
       </div>
@@ -1148,7 +1248,8 @@ function Kachel({ a, onClick }) {
       <div className="mt-4">
         <div className="flex items-center justify-between text-sm mb-1.5">
           <span className={fertig ? "text-ok font-semibold" : "text-muted"}>
-            {erledigt}/{gesamt} {gesamt === 1 ? "Position" : "Positionen"} für dich
+            {erledigt}/{gesamt} {gesamt === 1 ? "Position" : "Positionen"}
+            {a.beteiligte_bereiche ? "" : " für dich"}
           </span>
           <span className="text-muted">{minutenText(a.bereich_minuten)}</span>
         </div>
@@ -2089,7 +2190,9 @@ function SkizzenDialog({ kommentare, bilder, ichId, admin, nameVon, melde, auftr
 /* ---------- Detailansicht -------------------------------------------- */
 
 function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde, onZurueck, onGeaendert }) {
-  const derBereichName = (bereiche.find(b => b.schluessel === bereich) || {}).name || "diesen Bereich";
+  const derBereichName = bereich
+    ? ((bereiche.find(b => b.schluessel === bereich) || {}).name || "diesen Bereich")
+    : "alle Bereiche";
   const [auftrag, setAuftrag] = useState(null);
   const [positionen, setPositionen] = useState([]);
   const [buchungen, setBuchungen] = useState([]);
@@ -2249,7 +2352,9 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
 
   /* Eine Position gehört dem eigenen Bereich, wenn sie ihn ausdrücklich
      trägt - oder keinen eigenen hat und der Auftrag dem eigenen gehört. */
-  const gehoertMir = p => (p.bereich || auftrag.bereich) === bereich;
+  /* Ohne gewählten Bereich (Admin-Gesamtsicht) gehört alles dazu - dort
+     soll nichts gedämpft im Hintergrund stehen. */
+  const gehoertMir = p => !bereich || (p.bereich || auftrag.bereich) === bereich;
 
   /* Zukaufteile zählen mit, wenn sie dem eigenen Bereich gehören - fürs
      Büro sind sie die Arbeit. Ob Zeit gebucht werden kann, entscheidet
@@ -2269,7 +2374,9 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
     <div>
       <div className="flex flex-wrap items-center gap-4 mb-5">
         <Knopf art="geist" klein onClick={onZurueck}>← Zurück</Knopf>
-        <BereichBadge schluessel={bereich} bereiche={bereiche} />
+        {bereich
+          ? <BereichBadge schluessel={bereich} bereiche={bereiche} />
+          : <span className="text-muted text-sm font-semibold uppercase tracking-wider">Alle Bereiche</span>}
         {admin ? (
           <Knopf art="gefahr" klein className="ml-auto"
                  onClick={() => setDialog({ art: "auftragLoeschen" })}>
@@ -2353,7 +2460,10 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
 
       {alleFertig && istAktiv ? (
         <div className="bg-ok/10 border border-ok/40 rounded-2xl p-5 mb-5">
-          <div className="font-bold text-ok">Für {derBereichName} ist hier alles erledigt.</div>
+          <div className="font-bold text-ok">
+            {bereich ? "Für " + derBereichName + " ist hier alles erledigt."
+                     : "Alle Positionen sind erledigt."}
+          </div>
           <div className="text-muted text-sm mt-0.5">
             {fremde.length > 0
               ? "Andere Bereiche arbeiten noch am Auftrag."
@@ -2364,7 +2474,7 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
 
       {/* Die eigenen Positionen - das, wofür der Kollege hier ist. */}
       <h2 className="flex flex-wrap items-center gap-2.5 text-sm font-bold text-muted tracking-wider uppercase mb-3">
-        <span>Für {derBereichName}</span>
+        <span>{bereich ? "Für " + derBereichName : "Alle Positionen"}</span>
         <span className="opacity-70">
           ({meine.filter(p => p.erledigt).length}/{meine.length} erledigt)
         </span>
@@ -2382,6 +2492,8 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
                          nameVon={nameVon}
                          istAktiv={istAktiv}
                          admin={admin}
+                         bereiche={bereiche}
+                         zeigeBereich={!bereich ? (p.bereich || auftrag.bereich) : null}
                          onZeit={() => setDialog({ art: "zeit", pos: p })}
                          onBuchungen={() => setDialog({ art: "buchungen", pos: p })}
                          onBearbeiten={() => setDialog({ art: "position", pos: p })}
@@ -2692,6 +2804,7 @@ function BuchungenDialog({ pos, buchungen, mitarbeiter, nameVon, melde, onSchlie
 
 
 function PositionZeile({ p, minuten, buchungen, nameVon, istAktiv, admin,
+                         bereiche, zeigeBereich,
                          onZeit, onBuchungen, onBearbeiten, onLoeschen, onErledigt }) {
   const [zeigeBuchungen, setZeigeBuchungen] = useState(false);
 
@@ -2707,6 +2820,9 @@ function PositionZeile({ p, minuten, buchungen, nameVon, istAktiv, admin,
           </div>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-1.5">
             {p.menge ? <span className="text-muted text-sm">{p.menge} {p.einheit || ""}</span> : null}
+            {/* In der Gesamtsicht steht an jeder Position, wer sie macht -
+                sonst ginge die Zuordnung dort verloren. */}
+            {zeigeBereich ? <BereichBadge schluessel={zeigeBereich} bereiche={bereiche} klein /> : null}
             {!p.ist_fertigung ? (
               <span className="inline-flex items-center gap-1.5 text-muted text-xs
                                border border-line2 rounded-lg px-2 py-0.5">
