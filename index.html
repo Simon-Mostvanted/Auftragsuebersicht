@@ -535,6 +535,41 @@ function BereichBadge({ schluessel, bereiche, klein = false }) {
 }
 
 /** Wann das Fahrzeug da ist - und ob die Abholung schon durch ist. */
+/**
+ * Telefon und Mail des Kunden als anklickbare Verweise.
+ *
+ * Bewusst echte `tel:`- und `mailto:`-Verweise statt Text zum Abtippen:
+ * Auf dem Tablet in der Werkstatt ist ein Tipp der ganze Weg zum
+ * Anruf. Mehrere Nummern in einem Feld werden aufgetrennt, damit jede
+ * ihren eigenen bekommt.
+ */
+function KontaktZeile({ a }) {
+  const telefone = kontaktTeile(a.kunde_telefon);
+  const mails    = kontaktTeile(a.kunde_email);
+  if (!telefone.length && !mails.length) return null;
+
+  const chip = "inline-flex items-center gap-1.5 bg-chip border border-line rounded-xl " +
+               "px-3 py-2 text-sm min-h-10 hover:border-accent transition break-all";
+
+  return (
+    <div className="flex flex-wrap gap-2 mt-2">
+      {telefone.map((t, i) => (
+        /* Leerzeichen und Klammern stören beim Wählen, nicht beim Lesen -
+           deshalb nur im Verweis weg, nicht in der Anzeige. */
+        <a key={"t" + i} className={chip} href={"tel:" + t.replace(/[^\d+]/g, "")}>
+          <span>📞</span><span>{t}</span>
+        </a>
+      ))}
+      {mails.map((m, i) => (
+        <a key={"m" + i} className={chip} href={"mailto:" + m}>
+          <span>✉️</span><span>{m}</span>
+        </a>
+      ))}
+    </div>
+  );
+}
+
+
 function TerminZeile({ a, gross = false }) {
   const text = zeitraumText(a.vor_ort_von, a.vor_ort_bis);
 
@@ -1440,6 +1475,33 @@ async function lexware(aktion, daten = {}) {
   return data;
 }
 
+/* ---------- Erreichbarkeit des Kunden --------------------------------
+   Mail und Telefon stehen in je EINEM Textfeld am Auftrag, mehrere
+   Einträge durch " · " getrennt. Getrennte Spalten für Festnetz und
+   Handy hätten bedeutet, dass beim Anlegen jemand entscheidet, was was
+   ist - und Lexware gibt das nicht zuverlässig her. So steht alles da,
+   ist von Hand korrigierbar, und beim Anzeigen wird wieder aufgetrennt,
+   damit jede Nummer ihren eigenen Anruf-Verweis bekommt. */
+const KONTAKT_TRENNER = " · ";
+
+/** Die Listen aus der Edge Function zu Feldinhalten zusammenlegen. */
+function kontaktFelder(kontakt) {
+  const zusammen = liste => (liste || []).map(e => String(e).trim())
+                                         .filter(Boolean).join(KONTAKT_TRENNER);
+  return {
+    email:   zusammen(kontakt && kontakt.emails),
+    telefon: zusammen(kontakt && kontakt.telefone)
+  };
+}
+
+/** Ein Feld wieder in die einzelnen Einträge zerlegen. */
+function kontaktTeile(text) {
+  /* Auch Komma und Semikolon trennen: Wer von Hand nachträgt, tippt
+     eher ein Komma als das Trennzeichen aus dem Import. */
+  return String(text || "").split(/[·,;]|\s\/\s/)
+                           .map(t => t.trim()).filter(Boolean);
+}
+
 /** Base64 aus der Funktion in eine Datei, die sich hochladen lässt. */
 function base64ZuDatei(b64, name) {
   const roh = atob(b64);
@@ -1541,7 +1603,7 @@ function LexwareAuswahl({ melde, onWahl, onSchliessen }) {
 
 function NeuerAuftrag({ bereiche, regeln, bereich, ichId, onFertig, onAbbruch, melde }) {
   const [kopf, setKopf] = useState({
-    beleg_nr: "", kunde: "", fahrzeug: "", notiz: "",
+    beleg_nr: "", kunde: "", kunde_email: "", kunde_telefon: "", fahrzeug: "", notiz: "",
     vor_ort_von: "", vor_ort_bis: ""
   });
   const [zeilen, setZeilen] = useState([leereZeile()]);
@@ -1584,10 +1646,17 @@ function NeuerAuftrag({ bereiche, regeln, bereich, ichId, onFertig, onAbbruch, m
        Notiz. Leere Felder verschwinden. */
     const fahrzeugZeile = [k.fahrzeug, k.kennzeichen].filter(Boolean).join(" · ");
 
+    /* Erreichbarkeit hängt am Lexware-Kontakt, nicht am Beleg. Hat der
+       Beleg eine Einmaladresse oder ist der Kontakt ungepflegt, bleibt
+       es leer - dann trägt man es von Hand nach. */
+    const erreichbar = kontaktFelder(d.kontakt);
+
     setKopf(alt => ({
       ...alt,
       beleg_nr:    d.nummer || beleg.nummer || alt.beleg_nr,
       kunde:       (d.adresse && d.adresse.name) || beleg.kunde || alt.kunde,
+      kunde_email:   alt.kunde_email.trim()   || erreichbar.email,
+      kunde_telefon: alt.kunde_telefon.trim() || erreichbar.telefon,
       fahrzeug:    alt.fahrzeug.trim() || fahrzeugZeile,
       notiz:       alt.notiz.trim() || k.rest.join("\n"),
       vor_ort_von: alt.vor_ort_von || k.von,
@@ -1628,7 +1697,9 @@ function NeuerAuftrag({ bereiche, regeln, bereich, ichId, onFertig, onAbbruch, m
     }
 
     melde(posten.length + " Positionen aus Lexware übernommen — " +
-          "alles als Fertigung. Zukaufteile bitte umschalten.");
+          "alles als Fertigung. Zukaufteile bitte umschalten." +
+          (erreichbar.email || erreichbar.telefon
+            ? "" : " Beim Kontakt standen keine Kontaktdaten — bitte nachtragen."));
   }
 
   function merkeKey(wert) {
@@ -1697,7 +1768,8 @@ function NeuerAuftrag({ bereiche, regeln, bereich, ichId, onFertig, onAbbruch, m
    * sonst das PDF entfernen und jede Zeile einzeln wegklicken.
    */
   function allesVerwerfen() {
-    setKopf({ beleg_nr: "", kunde: "", fahrzeug: "", notiz: "", vor_ort_von: "", vor_ort_bis: "" });
+    setKopf({ beleg_nr: "", kunde: "", kunde_email: "", kunde_telefon: "",
+              fahrzeug: "", notiz: "", vor_ort_von: "", vor_ort_bis: "" });
     setZeilen([leereZeile()]);
     setDatei(null);
     if (dateiRef.current) dateiRef.current.value = "";
@@ -1753,6 +1825,8 @@ function NeuerAuftrag({ bereiche, regeln, bereich, ichId, onFertig, onAbbruch, m
         .insert({
           beleg_nr: kopf.beleg_nr.trim() || null,
           kunde:    kopf.kunde.trim() || null,
+          kunde_email:   kopf.kunde_email.trim() || null,
+          kunde_telefon: kopf.kunde_telefon.trim() || null,
           fahrzeug: kopf.fahrzeug.trim() || null,
           notiz:    kopf.notiz.trim() || null,
           vor_ort_von: kopf.vor_ort_von || null,
@@ -1859,6 +1933,30 @@ function NeuerAuftrag({ bereiche, regeln, bereich, ichId, onFertig, onAbbruch, m
             <input className={eingabeKlasse} value={kopf.notiz}
                    onChange={e => setKopf({ ...kopf, notiz: e.target.value })} />
           </Feld>
+        </div>
+
+        {/* Erreichbarkeit. Kommt beim Lexware-Import aus dem Kontakt,
+            steht aber hier zum Nachtragen: Belege mit Einmaladresse
+            hängen an keinem Kontakt, und nicht jeder Kontakt ist
+            gepflegt. */}
+        <div className="bg-chip border border-line rounded-xl p-4 mt-5">
+          <div className="flex items-center gap-2 mb-3">
+            <span>📞</span>
+            <span className="font-semibold text-sm">Kunde erreichen</span>
+            <span className="text-muted text-xs">
+              — kommt aus Lexware, sofern dort gepflegt
+            </span>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Feld label="Telefon (optional)" hinweis="Mehrere Nummern mit Komma trennen.">
+              <input className={eingabeKlasse} type="tel" value={kopf.kunde_telefon}
+                     onChange={e => setKopf({ ...kopf, kunde_telefon: e.target.value })} />
+            </Feld>
+            <Feld label="E-Mail (optional)">
+              <input className={eingabeKlasse} type="email" value={kopf.kunde_email}
+                     onChange={e => setKopf({ ...kopf, kunde_email: e.target.value })} />
+            </Feld>
+          </div>
         </div>
 
         {/* Der Termin bestimmt, wann der Auftrag von der Warteschlange
@@ -2585,6 +2683,7 @@ function Detail({ auftragId, mitarbeiter, bereiche, bereich, ichId, admin, melde
             <h1 className="text-2xl font-bold">{auftrag.beleg_nr || "ohne Beleg-Nr."}</h1>
             <p className="text-muted mt-1">{auftrag.kunde || "—"}</p>
             {auftrag.fahrzeug ? <p className="text-muted text-sm mt-0.5">🚐 {auftrag.fahrzeug}</p> : null}
+            <KontaktZeile a={auftrag} />
             <div className="mt-3">
               <TerminZeile a={auftrag} gross />
             </div>
@@ -2811,18 +2910,53 @@ function KopfDialog({ auftrag, melde, onSchliessen, onGespeichert }) {
   const [f, setF] = useState({
     beleg_nr: auftrag.beleg_nr || "",
     kunde:    auftrag.kunde || "",
+    kunde_email:   auftrag.kunde_email || "",
+    kunde_telefon: auftrag.kunde_telefon || "",
     fahrzeug: auftrag.fahrzeug || "",
     notiz:    auftrag.notiz || "",
     vor_ort_von: auftrag.vor_ort_von || "",
     vor_ort_bis: auftrag.vor_ort_bis || ""
   });
   const [speichert, setSpeichert] = useState(false);
+  const [holt, setHolt] = useState(false);
+
+  /**
+   * Erreichbarkeit für einen Auftrag nachholen, der vor dieser Änderung
+   * angelegt wurde. Geht nur, wenn er aus Lexware kam - sonst gibt es
+   * keinen Kontakt, an dem etwas hängen könnte.
+   *
+   * Gefüllte Felder werden NICHT überschrieben: Wer eine Nummer von
+   * Hand korrigiert hat, hatte einen Grund. Zum Ersetzen erst leeren.
+   */
+  async function ausLexwareNachholen() {
+    setHolt(true);
+    try {
+      const d = await lexware("vorbeleg", { typ: "lieferschein", id: auftrag.lexware_beleg_id });
+      const e = kontaktFelder(d.kontakt);
+      if (!e.email && !e.telefon) {
+        melde("Beim Lexware-Kontakt stehen keine Kontaktdaten.", "bad");
+        return;
+      }
+      setF(alt => ({
+        ...alt,
+        kunde_email:   alt.kunde_email.trim()   || e.email,
+        kunde_telefon: alt.kunde_telefon.trim() || e.telefon
+      }));
+      melde("Aus Lexware geholt — bitte prüfen und speichern.");
+    } catch (fehler) {
+      melde("Kontaktdaten konnten nicht geholt werden: " + (fehler.message || fehler), "bad");
+    } finally {
+      setHolt(false);
+    }
+  }
 
   async function speichern() {
     setSpeichert(true);
     const { error } = await db.from("auftraege").update({
       beleg_nr: f.beleg_nr.trim() || null,
       kunde:    f.kunde.trim() || null,
+      kunde_email:   f.kunde_email.trim() || null,
+      kunde_telefon: f.kunde_telefon.trim() || null,
       fahrzeug: f.fahrzeug.trim() || null,
       notiz:    f.notiz.trim() || null,
       vor_ort_von: f.vor_ort_von || null,
@@ -2848,6 +2982,30 @@ function KopfDialog({ auftrag, melde, onSchliessen, onGespeichert }) {
           <input className={eingabeKlasse} value={f.fahrzeug}
                  onChange={e => setF({ ...f, fahrzeug: e.target.value })} />
         </Feld>
+
+        <div className="bg-chip border border-line rounded-xl p-4">
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <span>📞</span>
+            <span className="font-semibold text-sm">Kunde erreichen</span>
+            {auftrag.lexware_beleg_id ? (
+              <Knopf klein art="geist" className="ml-auto"
+                     onClick={ausLexwareNachholen} disabled={holt || speichert}>
+                {holt ? "Holt…" : "Aus Lexware holen"}
+              </Knopf>
+            ) : null}
+          </div>
+          <div className="space-y-4">
+            <Feld label="Telefon" hinweis="Mehrere Nummern mit Komma trennen.">
+              <input className={eingabeKlasse} type="tel" value={f.kunde_telefon}
+                     onChange={e => setF({ ...f, kunde_telefon: e.target.value })} />
+            </Feld>
+            <Feld label="E-Mail">
+              <input className={eingabeKlasse} type="email" value={f.kunde_email}
+                     onChange={e => setF({ ...f, kunde_email: e.target.value })} />
+            </Feld>
+          </div>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <Feld label="Anlieferung">
             <DatumFeld wert={f.vor_ort_von}
